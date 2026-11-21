@@ -203,6 +203,7 @@ impl Doc {
             return Ok(None);
         };
         let mut tops = self.raw_shapes(&root, place);
+        tops.iter_mut().for_each(as_master_shape);
         Ok(match tops.len() {
             0 => None,
             1 => tops.pop(),
@@ -296,7 +297,7 @@ impl Doc {
         let tops = self.raw_shapes(&root, &name);
         let glue = connects(&root);
         let mut flat = Flat { doc: self, page: name, page_h: h, shapes: Vec::new(), connectors: Vec::new(), count, glue };
-        for t in &tops {
+        for t in tops.iter().filter(|t| !t.del) {
             let resolved = flat.doc.resolve(t, &flat.page);
             flat.walk(&resolved, &Affine::IDENTITY, 0)?;
         }
@@ -304,6 +305,15 @@ impl Doc {
         page.connectors = flat.connectors;
         Ok(page)
     }
+}
+
+/// Prepares a shape of a master to be inherited: it is not an instance of a master itself
+/// (following such a reference could never end), and shapes it deletes are dropped here so
+/// that each instance does not copy them.
+fn as_master_shape(s: &mut RawShape) {
+    s.master = None;
+    s.subs.retain(|c| !c.del);
+    s.subs.iter_mut().for_each(as_master_shape);
 }
 
 /// The glue target a `ToCell` names: `Connections.X<n>` is point `n`, anything else the shape.

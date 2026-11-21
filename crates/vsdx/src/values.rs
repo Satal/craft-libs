@@ -8,6 +8,8 @@ use crate::{Warning, WarningKind};
 
 /// Most warnings kept for one read; one more says how many were dropped.
 const MAX_WARNINGS: usize = 1_000;
+/// Largest length read, in inches: a larger one would overflow once scaled to points.
+const MAX_LENGTH: f64 = 1e12;
 /// Most style sheets followed up a parent chain.
 const MAX_STYLE_CHAIN: usize = 32;
 
@@ -86,10 +88,10 @@ pub(crate) fn length(cell: Option<&Cell>, sink: &mut Sink, place: &str, name: &s
     let Value::Num(n) = raw(cell, sink, place, name) else { return None };
     let unit = cell.and_then(|c| c.u.as_deref()).unwrap_or("");
     match inches_per(unit) {
-        Some(k) => Some(n * k).filter(|f| f.is_finite()),
+        Some(k) => Some((n * k).clamp(-MAX_LENGTH, MAX_LENGTH)).filter(|f| f.is_finite()),
         None => {
             sink.push(WarningKind::BadValue, place, format!("{name}: unit {:?} read as inches", clip(unit)));
-            Some(n)
+            Some(n.clamp(-MAX_LENGTH, MAX_LENGTH))
         }
     }
 }

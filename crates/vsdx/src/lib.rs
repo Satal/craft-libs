@@ -60,7 +60,8 @@
 //!
 //! - **O1 arrowheads.** `BeginArrow`/`EndArrow` take 0 (none) to 45, but which index is a
 //!   filled triangle is not stated. Reading keeps the index. [`ARROW`] (13) is what the writer
-//!   suggests for an arrowhead, unverified.
+//!   suggests for an arrowhead, unverified by the spec; one second consumer (LibreOffice Draw, opened
+//!   as a black box) draws it as a filled triangle at the end of a connector.
 //! - **O2 required parts.** Whether a package without style sheets, theme or document
 //!   properties opens everywhere is not stated. The writer emits style sheet 0 as in §3.1.1
 //!   and no theme.

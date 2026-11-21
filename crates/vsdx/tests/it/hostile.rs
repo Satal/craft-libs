@@ -129,3 +129,22 @@ fn a_zip_bomb_is_refused() {
     let tight = Limits { package: craft_opc::Limits::new(100, 1024 * 1024, 4 * 1024 * 1024), ..Limits::DEFAULT };
     assert!(read_with(&bytes, &tight).is_err_and(|e| e.is_limit()));
 }
+
+#[test]
+fn a_master_shape_that_names_its_own_master_is_read() {
+    // A shape inside a master that names a master is not an instance of it; following it
+    // would never end.
+    let master = format!(
+        r#"{}<Shapes><Shape ID="1" Type="Group"><Cell N="Width" V="1"/><Shapes><Shape ID="2" Master="1"><Cell N="Width" V="1"/></Shape></Shapes></Shape></Shapes></MasterContents>"#,
+        crate::root("MasterContents")
+    );
+    let bytes = package("", &[page_xml(r#"<Shape ID="4" Master="1"><Cell N="Width" V="1"/></Shape>"#, "")], &[("ID=\"1\"", master)]);
+    assert!(read(&bytes).is_ok_and(|(d, _)| d.pages[0].shapes.len() == 1));
+}
+
+#[test]
+fn lengths_too_large_to_scale_stay_finite() {
+    let shapes = r#"<Shape ID="1"><Cell N="PinX" V="1e308"/><Cell N="Width" V="1e308"/><Cell N="Height" V="1" U="MI"/><Section N="Geometry"><Row T="MoveTo"><Cell N="X" V="1e308"/><Cell N="Y" V="0"/></Row></Section></Shape>"#;
+    let r = read(&package("", &[page_xml(shapes, "")], &[]));
+    assert!(r.is_ok_and(|(d, _)| d.pages[0].shapes.iter().all(|s| [s.x, s.y, s.width, s.height].iter().all(|v| v.is_finite()))));
+}
