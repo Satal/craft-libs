@@ -239,6 +239,22 @@ impl Flowchart {
         out.merge(&node.style);
         out
     }
+
+    /// The style of edge `index` after the cascade: the classes named by its id, in order, then
+    /// its own `linkStyle` properties. Returns an empty style for an index out of range.
+    pub fn edge_style(&self, index: usize) -> Style {
+        let Some(edge) = self.edges.get(index) else {
+            return Style::default();
+        };
+        let mut out = Style::default();
+        for class in &edge.classes {
+            for def in self.class_defs.iter().filter(|c| &c.name == class) {
+                out.merge(&def.style);
+            }
+        }
+        out.merge(&edge.style);
+        out
+    }
 }
 
 /// Why a document was rejected outright.

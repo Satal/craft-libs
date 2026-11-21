@@ -1,6 +1,16 @@
 //! CSS-like style properties of `style`, `classDef` and `linkStyle`.
 
-/// Style properties. The properties a board needs are typed; every other pair is kept raw.
+/// Most raw (`other`) properties one style keeps; later new keys are dropped so one `classDef`
+/// shared by thousands of nodes cannot multiply without bound.
+const MAX_OTHER: usize = 32;
+/// Longest property key accepted, in bytes.
+const MAX_KEY: usize = 64;
+/// Longest property value accepted, in bytes.
+const MAX_VALUE: usize = 256;
+
+/// Style properties. The properties a board needs are typed; every other pair is kept raw (at
+/// most 32 pairs per style after merging; keys over 64 bytes and values over 256 bytes are
+/// rejected with a warning).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Style {
     /// `fill`, as written (`#f9f`, `red`).
@@ -43,7 +53,7 @@ impl Style {
         for (k, v) in &over.other {
             if let Some(slot) = self.other.iter_mut().find(|(ek, _)| ek == k) {
                 slot.1.clone_from(v);
-            } else {
+            } else if self.other.len() < MAX_OTHER {
                 self.other.push((k.clone(), v.clone()));
             }
         }
@@ -100,6 +110,10 @@ pub(crate) fn parse_style(props: &str) -> (Style, Vec<String>) {
         };
         let key = k.trim().to_ascii_lowercase();
         let value = v.trim().trim_end_matches("!important").trim().to_owned();
+        if key.len() > MAX_KEY || value.len() > MAX_VALUE {
+            bad.push(part.to_owned());
+            continue;
+        }
         match key.as_str() {
             "fill" => style.fill = Some(value),
             "stroke" => style.stroke = Some(value),

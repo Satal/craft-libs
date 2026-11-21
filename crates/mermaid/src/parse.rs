@@ -1,6 +1,7 @@
 //! The statement parser.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::link::{LinkTok, lex_inline_close, lex_inline_open, lex_link};
 use crate::shape::{BRACKETS, shape_by_name};
@@ -11,6 +12,9 @@ use crate::{ClassDef, Diagram, Direction, Edge, Endpoint, Flowchart, Node, Parse
 
 /// Cap on stored warnings (and notes); the entry after the last one says more were left out.
 const MAX_MESSAGES: usize = 1000;
+
+/// Longest stored warning or note, in characters.
+const MAX_MESSAGE_CHARS: usize = 200;
 
 /// Input limits. Exceeding one is a [`ParseError`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,8 +327,9 @@ struct Parser<'a> {
     stack: Vec<usize>,
     line: usize,
     class_assign: Vec<(usize, String, String)>,
-    style_assign: Vec<(usize, String, Style)>,
-    link_styles: Vec<(usize, Option<usize>, Style)>,
+    style_assign: Vec<(usize, String, Rc<Style>)>,
+    link_styles: Vec<(usize, Option<usize>, Rc<Style>)>,
+    classdef_ix: HashMap<String, usize>,
 }
 
 impl<'a> Parser<'a> {
@@ -343,6 +348,7 @@ impl<'a> Parser<'a> {
             class_assign: Vec::new(),
             style_assign: Vec::new(),
             link_styles: Vec::new(),
+            classdef_ix: HashMap::new(),
         }
     }
 
@@ -465,9 +471,13 @@ impl<'a> Parser<'a> {
             self.warn(self.line, format!("classDef: ignored malformed property {b:?}"));
         }
         for name in names {
-            if let Some(d) = self.chart.class_defs.iter_mut().find(|d| d.name == name) {
+            if let Some(d) = self.classdef_ix.get(&name).and_then(|&i| self.chart.class_defs.get_mut(i)) {
                 d.style.merge(&style);
+            } else if self.chart.class_defs.len() >= self.limits.max_nodes {
+                self.warn(self.line, "too many classDef names; ignored");
+                break;
             } else {
+                self.classdef_ix.insert(name.clone(), self.chart.class_defs.len());
                 self.chart.class_defs.push(ClassDef { name, style: style.clone() });
             }
         }
@@ -495,8 +505,9 @@ impl<'a> Parser<'a> {
         for b in bad {
             self.warn(self.line, format!("style: ignored malformed property {b:?}"));
         }
+        let style = Rc::new(style);
         for id in ids {
-            self.style_assign.push((self.line, id, style.clone()));
+            self.style_assign.push((self.line, id, Rc::clone(&style)));
         }
         Ok(())
     }
@@ -510,11 +521,12 @@ impl<'a> Parser<'a> {
         for b in bad {
             self.warn(self.line, format!("linkStyle: ignored malformed property {b:?}"));
         }
+        let style = Rc::new(style);
         for t in targets {
             if t == "default" {
-                self.link_styles.push((self.line, None, style.clone()));
+                self.link_styles.push((self.line, None, Rc::clone(&style)));
             } else if let Ok(n) = t.parse::<usize>() {
-                self.link_styles.push((self.line, Some(n), style.clone()));
+                self.link_styles.push((self.line, Some(n), Rc::clone(&style)));
             } else {
                 self.warn(self.line, format!("linkStyle: {t:?} is not an edge index"));
             }
@@ -866,7 +878,7 @@ impl<'a> Parser<'a> {
                 if let Some(edge) = self.chart.edges.get_mut(e) {
                     edge.classes.push(class);
                 }
-            } else if let Some(s) = self.chart.subgraphs.iter_mut().find(|s| s.id == id) {
+            } else if let Some(s) = self.opened.get(&id).and_then(|&i| self.chart.subgraphs.get_mut(i)) {
                 s.classes.push(class);
             } else {
                 self.warn(line, format!("class: unknown id {id:?}"));
@@ -875,16 +887,20 @@ impl<'a> Parser<'a> {
         for (line, id, style) in std::mem::take(&mut self.style_assign) {
             if let Some(node) = self.node_ix.get(&id).and_then(|&n| self.chart.nodes.get_mut(n)) {
                 node.style.merge(&style);
-            } else if let Some(s) = self.chart.subgraphs.iter_mut().find(|s| s.id == id) {
+            } else if let Some(s) = self.opened.get(&id).and_then(|&i| self.chart.subgraphs.get_mut(i)) {
                 s.style.merge(&style);
             } else {
                 self.warn(line, format!("style: unknown id {id:?}"));
             }
         }
         let link_styles = std::mem::take(&mut self.link_styles);
+        let mut default_style = Style::default();
         for (_, _, style) in link_styles.iter().filter(|(_, t, _)| t.is_none()) {
+            default_style.merge(style);
+        }
+        if !default_style.is_empty() {
             for e in &mut self.chart.edges {
-                e.style.merge(style);
+                e.style.merge(&default_style);
             }
         }
         for (line, target, style) in &link_styles {
@@ -900,9 +916,17 @@ impl<'a> Parser<'a> {
 
 fn push_capped(v: &mut Vec<Warning>, line: usize, message: String) {
     match v.len() {
-        n if n < MAX_MESSAGES => v.push(Warning { line, message }),
+        n if n < MAX_MESSAGES => v.push(Warning { line, message: truncate_message(message) }),
         MAX_MESSAGES => v.push(Warning { line, message: "further messages omitted".to_owned() }),
         _ => {}
+    }
+}
+
+/// Messages quote source text; cap them so a long id cannot multiply across 1000 warnings.
+fn truncate_message(message: String) -> String {
+    match message.char_indices().nth(MAX_MESSAGE_CHARS) {
+        Some((at, _)) => format!("{}...", message.get(..at).unwrap_or_default()),
+        None => message,
     }
 }
 
@@ -910,9 +934,10 @@ fn starts_at(c: &[char], at: usize, pat: &str) -> bool {
     pat.chars().enumerate().all(|(k, ch)| c.get(at + k) == Some(&ch))
 }
 
-/// The earliest closer at or after `from`: position, text and shape.
+/// The earliest closer at or after `from`: position, text and shape. One pass, so a closer that
+/// never comes costs one scan of the statement, not one per closer.
 fn first_closer(cur: &Cur, from: usize, closers: &'static [(&'static str, Shape)]) -> Option<(usize, &'static str, Shape)> {
-    closers.iter().filter_map(|(s, shape)| cur.find(from, s).map(|at| (at, *s, *shape))).min_by_key(|(at, _, _)| *at)
+    (from..cur.c.len()).find_map(|at| closers.iter().find(|(s, _)| starts_at(&cur.c, at, s)).map(|(s, shape)| (at, *s, *shape)))
 }
 
 /// `ident@` directly before a link (an edge id), returning the id and the index after the `@`.

@@ -780,6 +780,11 @@ fn single_pathological_statements_are_bounded() {
         format!("flowchart LR\nA{}", " & A".repeat(big / 4)),
         format!("flowchart LR\nA {}B", "--> B ".repeat(big / 6)),
         format!("flowchart LR\n{}", "A ".repeat(big / 2)),
+        // An unmatched second closer of `[/` must not rescan the statement for every node.
+        format!("flowchart LR\n{}", "A[/x/] ".repeat(big / 7)),
+        format!("flowchart LR\n{}{}", "A-->B\n".repeat(10_000), "linkStyle default stroke:red\n".repeat(30_000)),
+        format!("flowchart LR\nA\nstyle {} fill:red", vec!["a"; big / 4].join(",")),
+        format!("flowchart LR\nclassDef {} fill:red", (0..big / 8).map(|i| format!("c{i}")).collect::<Vec<_>>().join(",")),
     ];
     for c in &cases {
         sweep(c);
@@ -806,4 +811,42 @@ fn warnings_are_capped() {
 fn input_over_the_byte_limit_is_an_error() {
     let src = format!("flowchart LR\n{}", "A\n".repeat(600_000));
     assert!(matches!(parse(&src), Err(ParseError::TooLarge { .. })));
+}
+
+#[test]
+fn edge_style_applies_edge_classes_then_link_style() {
+    let f = fc("flowchart LR\nA e1@--> B\nclassDef c stroke:red,stroke-width:1px\nclass e1 c\nlinkStyle 0 stroke-width:3px");
+    let st = f.edge_style(0);
+    assert_eq!(st.stroke.as_deref(), Some("red"));
+    assert!(st.stroke_width > Some(1.0), "linkStyle beats the class");
+    assert!(f.edge_style(9).is_empty());
+}
+
+#[test]
+fn oversized_style_properties_are_rejected_with_a_warning() {
+    let long = "x".repeat(10_000);
+    let f = fc(&format!("flowchart LR\nA\nstyle A fill:red,custom:{long}"));
+    assert_eq!(node(&f, "A").style.fill.as_deref(), Some("red"));
+    assert!(node(&f, "A").style.other.is_empty());
+    assert_eq!(f.warnings.len(), 1);
+    assert!(f.warnings[0].message.len() < 1000, "warnings do not echo unbounded source text");
+}
+
+#[test]
+fn raw_style_pairs_per_node_stay_bounded() {
+    let props = (0..500).map(|i| format!("k{i}:v")).collect::<Vec<_>>().join(",");
+    let f = fc(&format!("flowchart LR\nA\nstyle A {props}"));
+    assert!(node(&f, "A").style.other.len() < 500);
+    let f = fc(&format!("flowchart LR\nA\nclassDef big {props}\nclass A big"));
+    assert!(f.node_style(0).other.len() < 500);
+}
+
+#[test]
+fn class_def_names_are_limited_by_the_node_budget() {
+    let limits = Limits { max_nodes: 3, ..Limits::default() };
+    let Ok(Diagram::Flowchart(f)) = parse_with_limits("flowchart LR\nclassDef a,b,c,d,e fill:red", &limits) else {
+        panic!("expected a flowchart");
+    };
+    assert_eq!(f.class_defs.len(), 3);
+    assert!(!f.warnings.is_empty());
 }
