@@ -3586,6 +3586,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-vsdx"
+version = "0.1.0"
+dependencies = [
+ "craft-opc",
+ "craft-testkit",
+ "craft-xml",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "craft-wasm"
 version = "0.1.0"
 dependencies = [

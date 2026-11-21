@@ -407,6 +407,7 @@ See the [release notes](CHANGELOG.md) for included functionality and known limit
   headers without decoding, and the RIFF container around an encoded VP8 frame with alpha, ICC,
   EXIF and XMP chunks. The VP8 and VP8L codecs are not part of it.
 - [`craft-xls`](crates/xls/README.md): clean-room Excel 97-2003 workbook (`.xls`, BIFF8) reader: worksheets, cell values, formulas as A1 text (shared and array formulas included), cell formats with resolved palette colours, merged cells, column and row records, defined names, print areas and calculation settings, with limits on records, cells and text.
+- [`craft-vsdx`](crates/vsdx/README.md): VSDX drawings (MS-VSDX) on `craft-opc`: pages, shapes with master inheritance, geometry, text, fill and line, and glued 1-D connectors, read into a points-based model with warnings for what is not drawn; VSSX stencil masters; a minimal drawing writer. Bounded on hostile input.
 - [`craft-wordmodel`](crates/wordmodel/README.md): a word-processing document model (stories, paragraphs,
   runs, tables, sections, styles, numbering, fields, notes, comments, revisions, drawings, math): what the
   text-format crates read into and write from. WordCraft's model without its editing code.

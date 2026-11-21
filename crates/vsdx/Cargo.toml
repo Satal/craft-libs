@@ -1,0 +1,19 @@
+[package]
+name = "craft-vsdx"
+description = "VSDX drawings and VSSX stencils (MS-VSDX): read pages, shapes, geometry, text, glued connectors and master inheritance from cached values; write a minimal drawing package"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+craft-opc = { workspace = true }
+craft-xml = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+craft-testkit = { workspace = true }
