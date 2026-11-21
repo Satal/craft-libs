@@ -181,6 +181,11 @@ See the [release notes](CHANGELOG.md) for included functionality and known limit
   millimetres to `G0`/`G1` moves with laser power and feed, for cutting lasers and plotters, as a
   commented file or as bare lines for streaming. Its `grbl` module has the real-time command bytes
   and the status and acknowledgement parsers.
+- [`craft-graph-layout`](crates/graph-layout/src/lib.rs): diagram layout in plain `f64`
+  geometry: layered flowchart layout (cycle removal, network-simplex ranking, median crossing
+  reduction, Brandes-Köpf coordinates) with nested groups, edge labels and orthogonal edges in four
+  directions, and obstacle-avoiding orthogonal connector routing with port spreading and nudging.
+  Deterministic, size-capped, no dependencies.
 - [`craft-gif`](crates/gif/src/lib.rs): GIF block reader, from PhotoCraft: the logical screen,
   every frame's position, delay, disposal and transparent colour, the loop count and the first
   frame's colour table, without decompressing pixels. Tells an animation from a still and whether

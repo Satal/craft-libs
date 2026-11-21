@@ -184,6 +184,7 @@ craft-quit = { path = "crates/quit" }
 craft-rtf = { path = "crates/rtf" }
 craft-raw = { path = "crates/raw" }
 craft-geom = { path = "crates/geom" }
+craft-graph-layout = { path = "crates/graph-layout" }
 craft-develop = { path = "crates/develop" }
 craft-develop-model = { path = "crates/develop-model" }
 craft-sheet = { path = "crates/sheet" }

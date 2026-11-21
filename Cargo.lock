@@ -2289,6 +2289,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-graph-layout"
+version = "0.1.0"
+
+[[package]]
 name = "craft-gridcraft-format"
 version = "0.1.0"
 dependencies = [

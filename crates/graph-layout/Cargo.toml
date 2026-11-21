@@ -1,0 +1,13 @@
+[package]
+name = "craft-graph-layout"
+description = "Layered (Sugiyama) graph layout with nested groups and obstacle-avoiding orthogonal connector routing for diagrams and flowcharts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
