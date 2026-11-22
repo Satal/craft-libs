@@ -1,5 +1,5 @@
 //! Relation tests for the flowchart parser: inputs written by us from the public flowchart
-//! documentation <https://mermaid.js.org/syntax/flowchart.html> (tests `t01` to `t40`, numbered in
+//! documentation <https://mermaid.js.org/syntax/flowchart.html> (the first 40 tests, in
 //! the order of its sections: header, nodes and shapes, links, subgraphs, styling, interaction),
 //! rules the documentation leaves open, and a hostile-input sweep. See `PROVENANCE.md`.
 
@@ -52,7 +52,7 @@ fn members<'a>(f: &'a Flowchart, id: &str) -> Vec<&'a str> {
 }
 
 #[test]
-fn t01_header_direction_and_one_edge() {
+fn header_direction_and_single_edge_parse_with_default_shapes() {
     let f = fc("flowchart LR\nA --> B");
     assert_eq!(f.direction, Direction::LeftToRight);
     assert_eq!(ids(&f), ["A", "B"]);
@@ -63,7 +63,7 @@ fn t01_header_direction_and_one_edge() {
 }
 
 #[test]
-fn t02_graph_td_is_top_to_bottom_without_spaces() {
+fn graph_keyword_td_and_missing_direction_mean_top_to_bottom() {
     let f = fc("graph TD\nA-->B");
     assert_eq!(f.direction, Direction::TopToBottom);
     assert_eq!(pairs(&f), [("A", "B")]);
@@ -71,7 +71,7 @@ fn t02_graph_td_is_top_to_bottom_without_spaces() {
 }
 
 #[test]
-fn t03_semicolons_separate_statements() {
+fn semicolons_separate_statements_on_one_line() {
     let f = fc("flowchart TB;A;B;A-->B;");
     assert_eq!(ids(&f), ["A", "B"]);
     assert_eq!(pairs(&f), [("A", "B")]);
@@ -79,7 +79,7 @@ fn t03_semicolons_separate_statements() {
 }
 
 #[test]
-fn t04_front_matter_is_skipped() {
+fn front_matter_block_is_skipped_before_the_header() {
     let f = fc("---\ntitle: Demo\nconfig:\n  theme: dark\n---\nflowchart BT\nX-->Y");
     assert_eq!(f.direction, Direction::BottomToTop);
     assert_eq!(pairs(&f), [("X", "Y")]);
@@ -87,7 +87,7 @@ fn t04_front_matter_is_skipped() {
 }
 
 #[test]
-fn t05_comments_are_ignored() {
+fn comment_lines_are_ignored_and_define_no_nodes() {
     let f = fc("flowchart RL\n%% a comment A --> Z\nA --> B");
     assert_eq!(f.direction, Direction::RightToLeft);
     assert_eq!(pairs(&f), [("A", "B")]);
@@ -95,7 +95,7 @@ fn t05_comments_are_ignored() {
 }
 
 #[test]
-fn t06_directive_is_skipped_even_across_lines() {
+fn init_directive_is_skipped_including_across_lines() {
     let f = fc("%%{init: {\"theme\":\"forest\"}}%%\nflowchart LR\nA-->B");
     assert_eq!(pairs(&f), [("A", "B")]);
     let g = fc("flowchart LR\n%%{\n  init: {\"theme\": \"dark\"}\n}%%\nA-->B");
@@ -104,7 +104,7 @@ fn t06_directive_is_skipped_even_across_lines() {
 }
 
 #[test]
-fn t07_round_family_shapes() {
+fn round_family_shapes_map_to_their_variants() {
     let f = fc("flowchart LR\nA[Rect] B(Round) C([Stad]) D[[Sub]] E[(DB)] F((Circ))");
     assert_eq!(shapes(&f), [Shape::Rect, Shape::Rounded, Shape::Stadium, Shape::Subroutine, Shape::Cylinder, Shape::Circle]);
     assert_eq!(node(&f, "C").label, "Stad");
@@ -112,28 +112,28 @@ fn t07_round_family_shapes() {
 }
 
 #[test]
-fn t08_flag_decision_hexagon_double_circle() {
+fn flag_decision_hexagon_and_double_circle_shapes_map_to_their_variants() {
     let f = fc("flowchart LR\nA>Flag] B{Dec} C{{Hex}} D(((Dbl)))");
     assert_eq!(shapes(&f), [Shape::Asymmetric, Shape::Diamond, Shape::Hexagon, Shape::DoubleCircle]);
     assert_eq!(node(&f, "D").label, "Dbl");
 }
 
 #[test]
-fn t09_slanted_shapes_keep_their_orientation() {
+fn slanted_shapes_keep_their_orientation() {
     let f = fc("flowchart LR\nA[/P1/] B[\\P2\\] C[/T1\\] D[\\T2/]");
     assert_eq!(shapes(&f), [Shape::LeanRight, Shape::LeanLeft, Shape::TrapezoidBottom, Shape::TrapezoidTop]);
     assert_eq!(node(&f, "B").label, "P2");
 }
 
 #[test]
-fn t10_quoted_label_may_hold_brackets() {
+fn quoted_label_may_hold_brackets() {
     let f = fc("flowchart LR\nA[\"Quoted (with) {chars}\"]");
     assert_eq!(node(&f, "A").label, "Quoted (with) {chars}");
     assert!(f.warnings.is_empty());
 }
 
 #[test]
-fn t11_end_inside_quotes_is_a_label() {
+fn end_inside_quotes_is_a_label_not_a_subgraph_close() {
     let f = fc("flowchart LR\nA[\"End of line\"] --> B[\"end\"]");
     assert_eq!(node(&f, "A").label, "End of line");
     assert_eq!(node(&f, "B").label, "end");
@@ -141,7 +141,7 @@ fn t11_end_inside_quotes_is_a_label() {
 }
 
 #[test]
-fn t12_br_becomes_newline() {
+fn br_tags_in_labels_become_newlines() {
     for br in ["<br/>", "<br>", "<BR />"] {
         let f = fc(&format!("flowchart LR\nA[\"a{br}b\"]"));
         assert_eq!(node(&f, "A").label, "a\nb", "{br}");
@@ -149,7 +149,7 @@ fn t12_br_becomes_newline() {
 }
 
 #[test]
-fn t13_entity_codes_are_decoded() {
+fn entity_codes_in_labels_are_decoded() {
     let f = fc("flowchart LR\nA[\"quote #quot;x#quot; and #9829;\"]");
     assert_eq!(node(&f, "A").label, "quote \"x\" and \u{2665}");
     assert!(f.warnings.is_empty());
@@ -157,7 +157,7 @@ fn t13_entity_codes_are_decoded() {
 }
 
 #[test]
-fn t14_markdown_label_keeps_real_newlines() {
+fn markdown_label_keeps_real_newlines_and_drops_backticks() {
     let f = fc("flowchart LR\nA[\"`**Bold** line\nsecond`\"] --> B");
     let a = node(&f, "A");
     assert!(a.markdown);
@@ -168,13 +168,13 @@ fn t14_markdown_label_keeps_real_newlines() {
 }
 
 #[test]
-fn t15_extended_shape_syntax() {
+fn extended_shape_syntax_sets_shape_and_label() {
     let f = fc("flowchart LR\nA@{ shape: diamond, label: \"Choose\" }");
     assert_eq!((node(&f, "A").shape, node(&f, "A").label.as_str()), (Shape::Diamond, "Choose"));
 }
 
 #[test]
-fn t16_aliases_fold_into_one_variant() {
+fn shape_aliases_fold_into_one_variant() {
     let f = fc("flowchart LR\nA@{ shape: cyl }\nB@{ shape: db, label: \"Store\" }\nC@{ shape: question }");
     assert_eq!(shapes(&f), [Shape::Cylinder, Shape::Cylinder, Shape::Diamond]);
     assert_eq!(node(&f, "A").label, "A");
@@ -182,7 +182,7 @@ fn t16_aliases_fold_into_one_variant() {
 }
 
 #[test]
-fn t17_unknown_shape_warns_and_falls_back() {
+fn unknown_extended_shape_warns_and_falls_back_to_rect() {
     let f = fc("flowchart LR\nA@{ shape: processes }\nB@{ shape: stop }\nC@{ shape: nosuchshape }");
     assert_eq!(shapes(&f), [Shape::StackedRect, Shape::FramedCircle, Shape::Rect]);
     assert_eq!(f.warnings.len(), 1);
@@ -190,14 +190,14 @@ fn t17_unknown_shape_warns_and_falls_back() {
 }
 
 #[test]
-fn t18_icon_node_is_a_labelled_placeholder() {
+fn icon_node_becomes_a_labelled_placeholder() {
     let f = fc("flowchart LR\nA@{ icon: \"fa:user\", form: \"circle\", label: \"Who\", pos: \"t\" }");
     assert_eq!((node(&f, "A").shape, node(&f, "A").label.as_str()), (Shape::Icon, "Who"));
     assert!(f.warnings.is_empty());
 }
 
 #[test]
-fn t19_stroke_kinds_without_heads() {
+fn link_stroke_kinds_without_heads() {
     let f = fc("flowchart LR\nA --- B -.- C === D ~~~ E");
     let strokes: Vec<_> = f.edges.iter().map(|e| e.stroke).collect();
     assert_eq!(strokes, [Stroke::Solid, Stroke::Dotted, Stroke::Thick, Stroke::Invisible]);
@@ -205,7 +205,7 @@ fn t19_stroke_kinds_without_heads() {
 }
 
 #[test]
-fn t20_end_heads() {
+fn link_end_heads_arrow_circle_and_cross() {
     let f = fc("flowchart LR\nA --> B -.-> C ==> D --o E --x F");
     let got: Vec<_> = f.edges.iter().map(|e| (e.stroke, e.end_head)).collect();
     assert_eq!(
@@ -221,7 +221,7 @@ fn t20_end_heads() {
 }
 
 #[test]
-fn t21_both_end_heads() {
+fn links_with_heads_at_both_ends() {
     let f = fc("flowchart LR\nA <--> B o--o C x--x D");
     let got: Vec<_> = f.edges.iter().map(|e| (e.start_head, e.end_head)).collect();
     assert_eq!(got, [(Head::Arrow, Head::Arrow), (Head::Circle, Head::Circle), (Head::Cross, Head::Cross)]);
@@ -229,7 +229,7 @@ fn t21_both_end_heads() {
 }
 
 #[test]
-fn t22_longer_links_span_more_ranks() {
+fn longer_links_span_more_ranks() {
     let f = fc("flowchart LR\nA ----> B ====> C -...-> D\nE --> F\nG --- H\nI ---- J");
     assert!(edge(&f, "A", "B").length > edge(&f, "E", "F").length);
     assert_eq!(edge(&f, "A", "B").end_head, Head::Arrow);
@@ -241,7 +241,7 @@ fn t22_longer_links_span_more_ranks() {
 }
 
 #[test]
-fn t23_edge_labels_both_syntaxes() {
+fn edge_labels_in_pipe_and_inline_syntaxes() {
     let f = fc("flowchart LR\nA -->|yes| B\nB -- no --> C\nC -. maybe .-> D\nD == sure ==> E");
     let got: Vec<_> = f.edges.iter().map(|e| (e.label.as_deref(), e.stroke, e.end_head)).collect();
     assert_eq!(
@@ -257,7 +257,7 @@ fn t23_edge_labels_both_syntaxes() {
 }
 
 #[test]
-fn t24_inline_label_with_longer_open_link() {
+fn inline_label_with_longer_open_link_lengthens_the_edge() {
     let f = fc("flowchart LR\nA -- long label ---- B\nC --> D");
     let e = edge(&f, "A", "B");
     assert_eq!((e.label.as_deref(), e.stroke, e.end_head), (Some("long label"), Stroke::Solid, Head::None));
@@ -265,22 +265,22 @@ fn t24_inline_label_with_longer_open_link() {
 }
 
 #[test]
-fn t25_chain() {
+fn chained_links_make_one_edge_per_pair() {
     assert_eq!(pairs(&fc("flowchart LR\nA --> B --> C")), [("A", "B"), ("B", "C")]);
 }
 
 #[test]
-fn t26_ampersand_is_a_product_in_documented_order() {
+fn ampersand_groups_expand_to_a_product_in_documented_order() {
     assert_eq!(pairs(&fc("flowchart LR\nA & B --> C & D")), [("A", "C"), ("A", "D"), ("B", "C"), ("B", "D")]);
 }
 
 #[test]
-fn t27_ampersand_inside_a_chain() {
+fn ampersand_inside_a_chain_expands_each_step() {
     assert_eq!(pairs(&fc("flowchart LR\na --> b & c --> d")), [("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")]);
 }
 
 #[test]
-fn t28_edge_id_and_ignored_properties() {
+fn edge_id_is_kept_and_property_line_is_noted_not_warned() {
     let f = fc("flowchart LR\nA e1@--> B\ne1@{ animate: true }");
     assert_eq!(f.edges.len(), 1);
     assert_eq!(f.edges[0].id.as_deref(), Some("e1"));
@@ -290,7 +290,7 @@ fn t28_edge_id_and_ignored_properties() {
 }
 
 #[test]
-fn t29_subgraph_with_title_and_edge_to_subgraph() {
+fn subgraph_title_and_edge_to_a_subgraph() {
     let f = fc("flowchart TB\nsubgraph one [First]\n  A --> B\nend\nC --> one");
     let s = sg(&f, "one");
     assert_eq!(s.title, "First");
@@ -302,7 +302,7 @@ fn t29_subgraph_with_title_and_edge_to_subgraph() {
 }
 
 #[test]
-fn t30_nested_subgraphs_with_direction() {
+fn nested_subgraphs_keep_parent_members_and_direction() {
     let f = fc("flowchart TB\nsubgraph \"Outer\"\n  subgraph inner\n    direction LR\n    X --> Y\n  end\n  Z\nend");
     let outer = sg(&f, "Outer");
     let inner = sg(&f, "inner");
@@ -317,7 +317,7 @@ fn t30_nested_subgraphs_with_direction() {
 }
 
 #[test]
-fn t31_class_shorthand_and_classdef() {
+fn class_shorthand_applies_classdef_style_to_that_node_only() {
     let f = fc("flowchart LR\nA:::hot --> B\nclassDef hot fill:#f96,stroke:#333,color:#fff");
     assert_eq!(node(&f, "A").classes, ["hot"]);
     assert!(node(&f, "B").classes.is_empty());
@@ -328,7 +328,7 @@ fn t31_class_shorthand_and_classdef() {
 }
 
 #[test]
-fn t32_class_statement_before_classdef() {
+fn class_statement_before_its_classdef_still_applies() {
     let f = fc("flowchart LR\nA --> B\nclass A,B big\nclassDef big stroke-width:4px");
     assert_eq!(node(&f, "A").classes, ["big"]);
     assert_eq!(node(&f, "B").classes, ["big"]);
@@ -337,7 +337,7 @@ fn t32_class_statement_before_classdef() {
 }
 
 #[test]
-fn t33_default_class_then_style_wins() {
+fn default_class_applies_to_all_and_style_line_wins() {
     let f = fc("flowchart LR\nclassDef default fill:#eee\nA --> B\nstyle B fill:#0f0,stroke:#000");
     assert_eq!(f.node_style(idx(&f, "A")).fill.as_deref(), Some("#eee"));
     let b = f.node_style(idx(&f, "B"));
@@ -346,7 +346,7 @@ fn t33_default_class_then_style_wins() {
 }
 
 #[test]
-fn t34_link_style_by_index_and_default() {
+fn link_style_applies_by_index_and_default() {
     let f = fc("flowchart LR\nA --> B\nB --> C\nlinkStyle 1 stroke:#f00,stroke-width:3px\nlinkStyle default color:blue");
     let (e0, e1) = (&f.edges[0], &f.edges[1]);
     assert_eq!(e1.style.stroke.as_deref(), Some("#f00"));
@@ -358,7 +358,7 @@ fn t34_link_style_by_index_and_default() {
 }
 
 #[test]
-fn t35_click_lines_are_consumed() {
+fn click_lines_are_consumed_and_noted_not_warned() {
     let f = fc("flowchart LR\nA --> B\nclick A \"https://example.com\" \"tip\" _blank\nclick B call cb()");
     assert_eq!(ids(&f), ["A", "B"]);
     assert_eq!(f.edges.len(), 1);
@@ -367,7 +367,7 @@ fn t35_click_lines_are_consumed() {
 }
 
 #[test]
-fn t36_o_and_x_ids_after_spaced_or_capital_links() {
+fn o_and_x_ids_after_spaced_or_capital_links_are_node_ids() {
     let f = fc("flowchart LR\ndev --- ops\nA --- oB\nA---Xb");
     assert_eq!(ids(&f), ["dev", "ops", "A", "oB", "Xb"]);
     assert_eq!(f.edges.len(), 3);
@@ -375,14 +375,14 @@ fn t36_o_and_x_ids_after_spaced_or_capital_links() {
 }
 
 #[test]
-fn t37_glued_o_is_a_circle_end() {
+fn glued_o_after_a_link_is_a_circle_end_head() {
     let f = fc("flowchart LR\nA---oB");
     assert_eq!(ids(&f), ["A", "B"]);
     assert_eq!(edge(&f, "A", "B").end_head, Head::Circle);
 }
 
 #[test]
-fn t38_other_diagrams_are_unsupported() {
+fn other_diagram_kinds_are_reported_as_unsupported() {
     assert_eq!(parse("sequenceDiagram\nA->>B: hi"), Ok(Diagram::Unsupported { kind: "sequenceDiagram".to_owned() }));
     for kind in ["classDiagram", "stateDiagram-v2", "erDiagram", "gantt", "pie", "mindmap", "C4Context", "xychart-beta"] {
         assert_eq!(parse(&format!("%% c\n{kind}\n  x")), Ok(Diagram::Unsupported { kind: kind.to_owned() }));
@@ -391,14 +391,14 @@ fn t38_other_diagrams_are_unsupported() {
 }
 
 #[test]
-fn t39_last_label_wins() {
+fn last_label_given_for_a_node_wins() {
     let f = fc("flowchart LR\nA[One]\nA[Two] --> B");
     assert_eq!(ids(&f), ["A", "B"]);
     assert_eq!(node(&f, "A").label, "Two");
 }
 
 #[test]
-fn t40_blank_lines_and_indentation() {
+fn blank_lines_and_indentation_are_ignored() {
     let f = fc("flowchart LR\nA[\"x\"] --> B\n\n\n   C --> D   \n");
     assert_eq!(ids(&f), ["A", "B", "C", "D"]);
     assert_eq!(pairs(&f), [("A", "B"), ("C", "D")]);

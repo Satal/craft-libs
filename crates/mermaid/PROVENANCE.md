@@ -29,6 +29,6 @@ example is copied.
 
 ## Test inputs
 
-Every test input in `tests/it/main.rs` was written by us from the documented syntax. The tests
-`t01` to `t40` follow the order of the sections of the flowchart page; the later tests cover
+Every test input in `tests/it/main.rs` was written by us from the documented syntax. The first 40 tests
+follow the order of the sections of the flowchart page; the later tests cover
 choices the documentation leaves open, limits and hostile input. No fixture file is used.
