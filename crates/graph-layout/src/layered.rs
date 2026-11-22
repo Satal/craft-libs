@@ -11,6 +11,7 @@ use crate::{
     Direction, Graph, LayeredOptions, Layout, LayoutError, MAX_EDGES, MAX_GROUP_DEPTH, MAX_GROUPS, MAX_LAYOUT_ITEMS, MAX_MIN_LEN, MAX_NODES, Point,
     Rect, Size, valid_len,
 };
+use std::collections::BTreeMap;
 
 const EPS: f64 = 1e-6;
 /// Least share of a node side that edge ports may use.
@@ -130,6 +131,29 @@ struct Chain {
     in_port: f64,
     /// Track y per segment index, for segments that jog.
     jogs: Vec<Option<f64>>,
+    /// The segment that goes round a group's title band, if any.
+    entry: Option<Entry>,
+}
+
+/// A chain segment that enters (or leaves) its groups through the side, under (or over) the title
+/// band: `lane` is the cross position outside the outermost group and `slot` the zone track,
+/// counted from the nodes.
+#[derive(Clone, Copy, Debug)]
+struct Entry {
+    seg: usize,
+    lane: f64,
+    slot: usize,
+}
+
+struct EntryCand {
+    chain: usize,
+    seg: usize,
+    group: usize,
+    rank: usize,
+    inner: usize,
+    inner_x: f64,
+    crossed: Vec<usize>,
+    left: Option<bool>,
 }
 
 impl<'a> Ctx<'a> {
@@ -367,7 +391,7 @@ impl<'a> Ctx<'a> {
             }
             items.push(node_item[b]);
             let segs = items.len() - 1;
-            chains.push(Chain { edge: e, reversed: rev, items, out_port: 0.0, in_port: 0.0, jogs: vec![None; segs] });
+            chains.push(Chain { edge: e, reversed: rev, items, out_port: 0.0, in_port: 0.0, jogs: vec![None; segs], entry: None });
         }
         let mut borders: Vec<(Vec<usize>, Vec<usize>)> = vec![(Vec::new(), Vec::new()); self.parent.len()];
         for (gi, s) in span.iter().enumerate() {
@@ -388,8 +412,9 @@ impl<'a> Ctx<'a> {
         let sep = |u: usize, v: usize| self.sep(&p, u, v);
         let x = crate::position::assign(&p, &sep);
         self.ports(&p, &x, &mut chains);
+        let zones = self.side_entries(&p, &x, &span, &borders, &mut chains);
         let tracks = self.tracks(&p, &x, &mut chains);
-        let geo = self.rank_geometry(&p, &span, &tracks);
+        let geo = self.rank_geometry(&p, &span, &tracks, &zones);
         for c in &mut chains {
             for (k, j) in c.jogs.iter_mut().enumerate() {
                 if let Some(t) = j {
@@ -400,6 +425,170 @@ impl<'a> Ctx<'a> {
         }
         let placed = Placed { p, x, geo, chains, loops, borders, span };
         Ok(self.emit_component(&placed))
+    }
+
+    /// Edges that cross a group's title band are rerouted to enter (or, for `Up`, leave) the group
+    /// through its side, just under (over) the band: down a lane outside the group, then across
+    /// a zone reserved between the band and the group's first rank. On each side the edges nest,
+    /// the one nearest the side taking the innermost lane and the slot farthest from the nodes, so
+    /// they do not cross one another. An edge that would cross another group or edge to do this
+    /// keeps crossing the band. Returns the zone slots per rank. `Right` and `Left` put the band
+    /// beside the ranks, where only edges entering through the side cross it, and are left alone.
+    fn side_entries(
+        &self,
+        p: &Proper,
+        x: &[f64],
+        span: &[Option<(usize, usize)>],
+        borders: &[(Vec<usize>, Vec<usize>)],
+        chains: &mut [Chain],
+    ) -> Vec<usize> {
+        let mut zones = vec![0usize; p.layers.len()];
+        let exit = match self.opts.direction {
+            Direction::Down => false,
+            Direction::Up => true,
+            Direction::Right | Direction::Left => return zones,
+        };
+        let pos = p.positions();
+        let mut cands = self.entry_candidates(p, x, span, borders, chains, exit);
+        let border_at = |g: usize, left: bool, r: usize| -> Option<usize> {
+            let (lo, _) = span.get(g).copied().flatten()?;
+            let list = if left { &borders.get(g)?.0 } else { &borders.get(g)?.1 };
+            list.get(r.checked_sub(lo)?).copied()
+        };
+        for _ in 0..4 {
+            let mut changed = false;
+            for i in 0..cands.len() {
+                let Some(left) = cands[i].left else { continue };
+                let ok = |side: bool| border_at(cands[i].group, side, cands[i].rank).is_some_and(|b| self.entry_clear(p, &pos, b, &cands, i, side));
+                let now = if ok(left) {
+                    Some(left)
+                } else if ok(!left) {
+                    Some(!left)
+                } else {
+                    None
+                };
+                if now != cands[i].left {
+                    cands[i].left = now;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut sets: BTreeMap<(usize, usize, bool), Vec<usize>> = BTreeMap::new();
+        for (i, c) in cands.iter().enumerate() {
+            if let Some(left) = c.left {
+                sets.entry((c.rank, c.group, left)).or_default().push(i);
+            }
+        }
+        for ((rank, group, left), mut list) in sets {
+            let Some(b) = border_at(group, left, rank) else { continue };
+            let m = list.len();
+            let d = self.opts.edge_sep.min(self.lane_room(p, x, &pos, b, left) / (m as f64 + 0.5));
+            if d < 2.0 {
+                continue;
+            }
+            list.sort_by(|&a, &b| {
+                let o = cands[a].inner_x.total_cmp(&cands[b].inner_x);
+                (if left { o } else { o.reverse() }).then(a.cmp(&b))
+            });
+            for (i, &ci) in list.iter().enumerate() {
+                let c = &cands[ci];
+                let j = (m - 1 - i) as f64;
+                let lane = if left { x[b] - (j + 1.0) * d } else { x[b] + (j + 1.0) * d };
+                if let Some(ch) = chains.get_mut(c.chain) {
+                    ch.entry = Some(Entry { seg: c.seg, lane, slot: i });
+                }
+            }
+            zones[rank] = zones[rank].max(m);
+        }
+        zones
+    }
+
+    /// Chain segments that cross the title band of a group they enter (leave, with `exit`).
+    fn entry_candidates(
+        &self,
+        p: &Proper,
+        x: &[f64],
+        span: &[Option<(usize, usize)>],
+        borders: &[(Vec<usize>, Vec<usize>)],
+        chains: &[Chain],
+        exit: bool,
+    ) -> Vec<EntryCand> {
+        let mut out = Vec::new();
+        for (ci, c) in chains.iter().enumerate() {
+            let last = c.items.len() - 1;
+            for k in 0..last {
+                let (u, v) = (c.items[k], c.items[k + 1]);
+                let (inside, outside) = if exit { (u, v) } else { (v, u) };
+                let rank = p.items[inside].rank;
+                let outer = self.ancestors(p.items[outside].owner);
+                let crossed: Vec<usize> = self.ancestors(p.items[inside].owner).into_iter().filter(|g| !outer.contains(g)).collect();
+                let Some(&group) = crossed.last() else { continue };
+                let at_band = |g: &usize| span[*g].is_some_and(|(lo, hi)| if exit { hi == rank } else { lo == rank });
+                let titled = crossed.iter().any(|&g| self.g.groups.get(g).is_some_and(|gr| gr.title_height > 0.0));
+                if !titled || !crossed.iter().all(at_band) || borders[group].0.is_empty() {
+                    continue;
+                }
+                let inner_x = match (exit, k == 0, k + 1 == last) {
+                    (true, true, _) => c.out_port,
+                    (false, _, true) => c.in_port,
+                    _ => x[inside],
+                };
+                let lo = span[group].map_or(0, |s| s.0);
+                let (bl, br) = (borders[group].0.get(rank - lo), borders[group].1.get(rank - lo));
+                let (Some(&bl), Some(&br)) = (bl, br) else { continue };
+                let left = inner_x - x[bl] <= x[br] - inner_x;
+                out.push(EntryCand { chain: ci, seg: k, group, rank, inner: inside, inner_x, crossed, left: Some(left) });
+            }
+        }
+        out
+    }
+
+    /// Whether candidate `i` can run from border item `b` to its inner item along its zone without
+    /// crossing another group's border or an edge that does not nest with it.
+    fn entry_clear(&self, p: &Proper, pos: &[usize], b: usize, cands: &[EntryCand], i: usize, left: bool) -> bool {
+        let c = &cands[i];
+        let layer = &p.layers[c.rank];
+        let (a, z) = if left { (pos[b] + 1, pos[c.inner]) } else { (pos[c.inner] + 1, pos[b]) };
+        if a > z {
+            return false;
+        }
+        layer[a..z].iter().all(|&w| match p.items[w].kind {
+            Kind::BorderL(h) | Kind::BorderR(h) => c.crossed.contains(&h),
+            Kind::Node(_) => true,
+            Kind::Dummy | Kind::Label(_) => cands.iter().any(|o| o.inner == w && o.left == Some(left) && o.group == c.group && o.rank == c.rank),
+        })
+    }
+
+    /// Free width beside border item `b`, on its outer side, for lanes: half the gap to the next
+    /// item, so a group on the other side can use the other half.
+    fn lane_room(&self, p: &Proper, x: &[f64], pos: &[usize], b: usize, left: bool) -> f64 {
+        let layer = &p.layers[p.items[b].rank];
+        let nb = if left { pos[b].checked_sub(1).and_then(|i| layer.get(i)) } else { layer.get(pos[b] + 1) };
+        match nb {
+            Some(&w) => {
+                let it = &p.items[w];
+                let gap = if left { x[b] - (x[w] + it.right_ext) } else { (x[w] - it.left_ext) - x[b] };
+                gap.max(0.0) / 2.0
+            }
+            None => self.opts.edge_sep * 4.0,
+        }
+    }
+
+    /// `g` and its ancestors, innermost first.
+    fn ancestors(&self, g: Option<usize>) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut cur = g;
+        while let Some(c) = cur {
+            if out.len() > crate::MAX_GROUP_DEPTH {
+                break;
+            }
+            out.push(c);
+            cur = self.parent.get(c).copied().flatten();
+        }
+        out
     }
 
     fn loop_extra(&self, loops: &[(usize, Vec<usize>)], v: usize) -> f64 {
@@ -530,10 +719,15 @@ impl<'a> Ctx<'a> {
             for k in 0..last {
                 let sx = if k == 0 { c.out_port } else { x[c.items[k]] };
                 let tx = if k + 1 == last { c.in_port } else { x[c.items[k + 1]] };
-                if (sx - tx).abs() > EPS {
+                let seg = match c.entry {
+                    Some(en) if en.seg == k && self.opts.direction == Direction::Up => Some(ChannelSeg::new((en.lane, -1), (tx, 1))),
+                    Some(en) if en.seg == k => Some(ChannelSeg::new((sx, -1), (en.lane, 1))),
+                    _ => ((sx - tx).abs() > EPS).then(|| ChannelSeg::new((sx, -1), (tx, 1))),
+                };
+                if let Some(seg) = seg {
                     let r = p.items[c.items[k]].rank;
                     if let Some(gl) = per_gap.get_mut(r) {
-                        gl.push((ci, k, ChannelSeg::new((sx, -1), (tx, 1))));
+                        gl.push((ci, k, seg));
                     }
                 }
             }
@@ -552,7 +746,7 @@ impl<'a> Ctx<'a> {
         counts
     }
 
-    fn rank_geometry(&self, p: &Proper, span: &[Option<(usize, usize)>], tracks: &[usize]) -> RankGeo {
+    fn rank_geometry(&self, p: &Proper, span: &[Option<(usize, usize)>], tracks: &[usize], zones: &[usize]) -> RankGeo {
         let h = p.layers.len();
         let mut lh = vec![0.0f64; h];
         for it in &p.items {
@@ -567,6 +761,11 @@ impl<'a> Ctx<'a> {
                 below[hi] = below[hi].max(ext_below[gi]);
             }
         }
+        let exit = self.opts.direction == Direction::Up;
+        let zone: Vec<f64> = (0..h).map(|r| zones.get(r).copied().unwrap_or(0) as f64 * self.opts.edge_sep).collect();
+        for r in 0..h {
+            if exit { below[r] += zone[r] } else { above[r] += zone[r] }
+        }
         let rank_sep = if self.has_labels { self.opts.rank_sep / 2.0 } else { self.opts.rank_sep };
         let mut top = vec![0.0f64; h];
         let mut tracks_k = vec![0usize; h];
@@ -579,7 +778,7 @@ impl<'a> Ctx<'a> {
             let gap = rank_sep.max(bands + region);
             top[r + 1] = top[r] + lh[r] + gap;
         }
-        RankGeo { top, lh, above, below, tracks: tracks_k, ext_above, ext_below }
+        RankGeo { top, lh, above, below, tracks: tracks_k, ext_above, ext_below, zone, exit }
     }
 
     /// How far each group reaches above its first rank's top and below its last rank's bottom,
@@ -625,8 +824,9 @@ impl<'a> Ctx<'a> {
             let xs = |v: &Vec<usize>| v.iter().map(|&b| pl.x[b]).collect::<Vec<f64>>();
             let left = xs(&pl.borders[gi].0).into_iter().fold(f64::INFINITY, f64::min);
             let right = xs(&pl.borders[gi].1).into_iter().fold(f64::NEG_INFINITY, f64::max);
-            let top = pl.geo.top[lo] - pl.geo.ext_above[gi];
-            let bottom = pl.geo.bottom(hi) + pl.geo.ext_below[gi];
+            let (zin, zout) = if pl.geo.exit { (0.0, pl.geo.zone[hi]) } else { (pl.geo.zone[lo], 0.0) };
+            let top = pl.geo.top[lo] - pl.geo.ext_above[gi] - zin;
+            let bottom = pl.geo.bottom(hi) + pl.geo.ext_below[gi] + zout;
             if left.is_finite() && right.is_finite() {
                 out.groups.push((gi, Rect::new(left, top, (right - left).max(0.0), (bottom - top).max(0.0))));
             }
@@ -660,9 +860,19 @@ impl<'a> Ctx<'a> {
         for k in 0..last {
             let sx = if k == 0 { c.out_port } else { pl.x[c.items[k]] };
             let tx = if k + 1 == last { c.in_port } else { pl.x[c.items[k + 1]] };
-            if let Some(y) = c.jogs[k] {
-                pts.push(Point::new(sx, y));
-                pts.push(Point::new(tx, y));
+            let Some(y) = c.jogs[k] else { continue };
+            match c.entry {
+                Some(en) if en.seg == k => {
+                    let d = (en.slot as f64 + 1.0) * self.opts.edge_sep;
+                    if pl.geo.exit {
+                        let yz = pl.geo.bottom(pl.p.items[c.items[k]].rank) + d;
+                        pts.extend([Point::new(sx, yz), Point::new(en.lane, yz), Point::new(en.lane, y), Point::new(tx, y)]);
+                    } else {
+                        let yz = pl.geo.top[pl.p.items[c.items[k + 1]].rank] - d;
+                        pts.extend([Point::new(sx, y), Point::new(en.lane, y), Point::new(en.lane, yz), Point::new(tx, yz)]);
+                    }
+                }
+                _ => pts.extend([Point::new(sx, y), Point::new(tx, y)]),
             }
         }
         pts.push(Point::new(c.in_port, pl.geo.centre(ib.rank) - ib.along / 2.0));
@@ -849,6 +1059,9 @@ struct RankGeo {
     tracks: Vec<usize>,
     ext_above: Vec<f64>,
     ext_below: Vec<f64>,
+    /// Height of the side-entry zone at each rank: above it, or below it with `exit`.
+    zone: Vec<f64>,
+    exit: bool,
 }
 
 impl RankGeo {

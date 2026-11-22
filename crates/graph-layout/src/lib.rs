@@ -33,6 +33,10 @@
 //!    the opposite side; ports on one side are spread apart, keeping straight edges straight where
 //!    the spacing allows. Bends between ranks are assigned to separate horizontal tracks, ordered to
 //!    avoid crossings, as in the nudging step below.
+//!    With `Down` or `Up`, an edge that would cross a group's title band to reach a member enters
+//!    (or leaves) through the group's side instead, along a lane outside the group and a zone
+//!    reserved under the band, in the spirit of Sander's (1996) treatment of edges into compound
+//!    nodes; such edges nest on each side so they do not cross one another.
 //!
 //! # Connector routing
 //!

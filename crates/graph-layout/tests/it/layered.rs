@@ -212,6 +212,21 @@ fn nested_groups_contain_members_and_exclude_the_rest() {
 }
 
 #[test]
+fn edges_go_round_title_bands_when_ranks_run_vertically() {
+    let g = nested_graph();
+    for dir in [Direction::Down, Direction::Up] {
+        let l = layered(&g, &LayeredOptions { direction: dir, ..LayeredOptions::default() }).unwrap();
+        assert_edges_clean(&g, &l);
+        for (gi, spec) in g.groups.iter().enumerate().filter(|(_, s)| s.title_height > 0.0) {
+            let band = Rect::new(l.groups[gi].x, l.groups[gi].y, l.groups[gi].width, spec.title_height);
+            for (i, pts) in l.edges.iter().enumerate() {
+                assert!(!path_hits(pts, &band), "{dir:?}: edge {i} crosses group {gi}'s title: {pts:?} {band:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn the_title_band_stays_clear_of_members_in_every_direction() {
     let g = nested_graph();
     for dir in [Direction::Down, Direction::Up, Direction::Right, Direction::Left] {
