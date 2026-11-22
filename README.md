@@ -286,6 +286,7 @@ See the [release notes](CHANGELOG.md) for included functionality and known limit
   (app menu, Window, Help, system-key clashes), a platform backend trait, and key equivalents
   fed back to egui as the input egui-winit would have made. Commands and their enabled state
   stay in each app.
+- [`craft-mermaid`](crates/mermaid/src/lib.rs): a bounded, clean-room parser for Mermaid flowchart text (`flowchart` and `graph`) into plain data: nodes with shapes, edges with stroke, heads and labels, nested subgraphs, styles and classes, and warnings for anything it cannot read. Other diagram types are reported as unsupported. Provenance in `crates/mermaid/PROVENANCE.md`.
 - [`craft-mesh`](crates/mesh/README.md): 3D mesh file formats behind one neutral model (meshes
   of polygons with per-corner indices, materials, a node hierarchy): STL, OBJ with MTL, PLY,
   glTF 2.0 / GLB, FBX and 3MF, one feature each. Readers are bounded by `Limits`, never open a file

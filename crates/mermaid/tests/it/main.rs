@@ -1,5 +1,7 @@
-//! Relation tests for the flowchart parser: the documentation-derived corpus T01-T40, rules the
-//! corpus does not reach, and a hostile-input sweep.
+//! Relation tests for the flowchart parser: inputs written by us from the public flowchart
+//! documentation <https://mermaid.js.org/syntax/flowchart.html> (tests `t01` to `t40`, numbered in
+//! the order of its sections: header, nodes and shapes, links, subgraphs, styling, interaction),
+//! rules the documentation leaves open, and a hostile-input sweep. See `PROVENANCE.md`.
 
 use craft_mermaid::{Diagram, Direction, Edge, Endpoint, Flowchart, Head, Limits, ParseError, Shape, Stroke, parse, parse_with_limits};
 
@@ -403,7 +405,7 @@ fn t40_blank_lines_and_indentation() {
     assert!(f.warnings.is_empty());
 }
 
-// ---- rules the corpus does not reach ----
+// ---- rules the documentation leaves open ----
 
 #[test]
 fn node_order_is_first_appearance_and_redefinition_keeps_the_node() {

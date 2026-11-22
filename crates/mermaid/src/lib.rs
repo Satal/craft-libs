@@ -10,11 +10,14 @@
 //!
 //! # Clean room
 //!
-//! The syntax is taken from the user-facing Mermaid documentation only (a docs-derived
-//! specification kept in the FigCraft research notes); no Mermaid source, grammar or third-party
-//! parser was read. Documentation sources (Mermaid 12.3 docs, read 2026-11-21):
+//! The syntax is taken from the user-facing Mermaid documentation only; no Mermaid source,
+//! grammar or third-party parser was read. `PROVENANCE.md` in the crate lists what was read and
+//! what was not. Documentation pages (Mermaid 12.3 docs, read 2026-11-21):
 //!
-//! - <https://mermaid.js.org/syntax/flowchart.html> (nodes, shapes, links, subgraphs, styling)
+//! - <https://mermaid.js.org/syntax/flowchart.html>: the sections on orientation, node shapes,
+//!   expanded node shapes (11.3.0), special characters and Markdown strings, links between
+//!   nodes (types, text on links, chaining, edge ids), subgraphs, styling and classes,
+//!   interaction (`click`) and comments
 //! - <https://mermaid.js.org/intro/syntax-reference.html> (comments, header)
 //! - <https://mermaid.js.org/config/directives.html> (`%%{init}%%`)
 //! - <https://mermaid.js.org/intro/> and the per-diagram pages (header keywords)
