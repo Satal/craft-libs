@@ -212,15 +212,25 @@ fn nested_groups_contain_members_and_exclude_the_rest() {
 }
 
 #[test]
-fn edges_go_round_title_bands_when_ranks_run_vertically() {
+fn edges_cross_title_bands_clear_of_the_text_and_stay_inside_their_common_group() {
     let g = nested_graph();
-    for dir in [Direction::Down, Direction::Up] {
+    for dir in [Direction::Down, Direction::Up, Direction::Right, Direction::Left] {
         let l = layered(&g, &LayeredOptions { direction: dir, ..LayeredOptions::default() }).unwrap();
-        assert_edges_clean(&g, &l);
         for (gi, spec) in g.groups.iter().enumerate().filter(|(_, s)| s.title_height > 0.0) {
-            let band = Rect::new(l.groups[gi].x, l.groups[gi].y, l.groups[gi].width, spec.title_height);
+            let r = l.groups[gi];
+            let text = Rect::new(r.x, r.y, (r.width / 2.0).min(5.0 * spec.title_height), spec.title_height);
             for (i, pts) in l.edges.iter().enumerate() {
-                assert!(!path_hits(pts, &band), "{dir:?}: edge {i} crosses group {gi}'s title: {pts:?} {band:?}");
+                assert!(!path_hits(pts, &text), "{dir:?}: edge {i} crosses group {gi}'s title: {pts:?} {text:?}");
+            }
+        }
+        for (i, e) in g.edges.iter().enumerate() {
+            let mut common = g.nodes[e.from].group;
+            while let Some(c) = common.filter(|&c| !in_group(&g, g.nodes[e.to].group, c)) {
+                common = g.groups[c].parent;
+            }
+            let Some(common) = common else { continue };
+            for pt in &l.edges[i] {
+                assert!(contains(&l.groups[common], &Rect::new(pt.x, pt.y, 0.0, 0.0)), "{dir:?}: edge {i} leaves group {common}: {:?}", l.edges[i]);
             }
         }
     }

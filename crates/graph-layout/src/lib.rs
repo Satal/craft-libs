@@ -33,10 +33,6 @@
 //!    the opposite side; ports on one side are spread apart, keeping straight edges straight where
 //!    the spacing allows. Bends between ranks are assigned to separate horizontal tracks, ordered to
 //!    avoid crossings, as in the nudging step below.
-//!    With `Down` or `Up`, an edge that would cross a group's title band to reach a member enters
-//!    (or leaves) through the group's side instead, along a lane outside the group and a zone
-//!    reserved under the band, in the spirit of Sander's (1996) treatment of edges into compound
-//!    nodes; such edges nest on each side so they do not cross one another.
 //!
 //! # Connector routing
 //!
@@ -218,7 +214,9 @@ pub struct GroupSpec {
     /// Space between the group's edge and its contents.
     pub padding: f64,
     /// Extra space for a title band along the group's top edge (in output coordinates, whatever
-    /// the direction), 0 for none.
+    /// the direction), 0 for none. The title is expected at the band's left; with `Down` and `Up`,
+    /// edges cross the band to the right of half the group's width or five title heights, whichever
+    /// is less, where the node they reach allows.
     pub title_height: f64,
 }
 
