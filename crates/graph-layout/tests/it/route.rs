@@ -177,3 +177,50 @@ fn bad_input_is_an_error() {
     let many = vec![ok; MAX_OBSTACLES + 1];
     assert!(matches!(route_orthogonal(&port(ok), &port(ok), &many, &opts), Err(LayoutError::TooLarge { .. })));
 }
+
+/// Horizontal segments of `p` that run through the corridor `x0..x1`, as their y.
+fn corridor_runs(p: &[Point], x0: f64, x1: f64) -> Vec<f64> {
+    p.windows(2).filter(|w| (w[0].y - w[1].y).abs() < 1e-6 && w[0].x.min(w[1].x) < x0 && w[0].x.max(w[1].x) > x1).map(|w| w[0].y).collect()
+}
+
+/// Two tall walls with a corridor between them, y 40 to 140, too tall to go round.
+fn corridor() -> (Rect, Rect) {
+    (Rect::new(0.0, -1000.0, 400.0, 1040.0), Rect::new(0.0, 140.0, 400.0, 1000.0))
+}
+
+#[test]
+fn route_all_runs_a_lone_connector_down_the_middle_of_its_channel() {
+    let (top, bottom) = corridor();
+    let (a, b) = (Rect::new(-100.0, -20.0, 40.0, 30.0), Rect::new(460.0, 200.0, 40.0, 30.0));
+    let obstacles = [top, bottom, a, b];
+    let paths = route_all(&[Connector { from: port(a), to: port(b) }], &obstacles, &RouteOptions::default()).unwrap();
+    let p = paths[0].as_ref().unwrap();
+    assert_route(p, &a, &b, &obstacles);
+    let runs = corridor_runs(p, 0.0, 400.0);
+    assert!(!runs.is_empty(), "should go through the corridor: {p:?}");
+    let third = (bottom.y - top.bottom()) / 3.0;
+    assert!(runs.iter().all(|&y| y > top.bottom() + third && y < bottom.y - third), "hugs a wall: {p:?}");
+}
+
+#[test]
+fn route_all_spreads_connectors_sharing_a_channel_across_it() {
+    let (top, bottom) = corridor();
+    let from: Vec<Rect> = (0..3).map(|i| Rect::new(-100.0, -20.0 - 50.0 * i as f64, 40.0, 30.0)).collect();
+    let to: Vec<Rect> = (0..3).map(|i| Rect::new(460.0 + 60.0 * i as f64, 200.0, 40.0, 30.0)).collect();
+    let mut obstacles = vec![top, bottom];
+    obstacles.extend(&from);
+    obstacles.extend(&to);
+    let opts = RouteOptions::default();
+    let conns: Vec<Connector> = (0..3).map(|i| Connector { from: port(from[i]), to: port(to[i]) }).collect();
+    let paths: Vec<Vec<Point>> = route_all(&conns, &obstacles, &opts).unwrap().into_iter().map(Option::unwrap).collect();
+    let mut ys = Vec::new();
+    for (i, p) in paths.iter().enumerate() {
+        assert_route(p, &from[i], &to[i], &obstacles);
+        ys.extend(corridor_runs(p, 0.0, 400.0));
+    }
+    assert_eq!(ys.len(), 3, "each should go through the corridor once: {paths:?}");
+    ys.sort_by(f64::total_cmp);
+    assert!(ys[0] >= top.bottom() + opts.clearance && ys[2] <= bottom.y - opts.clearance, "hugs a wall: {ys:?}");
+    assert!(ys.windows(2).all(|w| w[1] - w[0] > 2.0 * opts.separation), "bunched together: {ys:?}");
+    assert_eq!(crate::common::crossings(&paths), 0, "{paths:?}");
+}

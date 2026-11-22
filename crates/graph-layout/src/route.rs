@@ -1,7 +1,8 @@
 //! Orthogonal connector routing after Wybrow, Marriott and Stuckey, "Orthogonal Connector
 //! Routing" (Graph Drawing 2009): a grid over the interesting coordinates of the inflated
 //! obstacles, A* over (grid point, heading) minimising length plus a penalty per bend, and nudging
-//! that orders and separates overlapping segments in a shared channel.
+//! that orders the segments sharing a channel and spreads them across its free width, so
+//! connectors neither hug obstacles nor run bunched together.
 
 use crate::channel::{ChannelSeg, assign_tracks};
 use crate::layered::simplify;
@@ -32,7 +33,8 @@ pub fn route_orthogonal(from: &Port, to: &Port, obstacles: &[Rect], opts: &Route
 }
 
 /// Routes every connector as [`route_orthogonal`] does, then spreads connectors that share a side
-/// of a shape along it and separates overlapping parallel segments by `opts.separation` where the
+/// of a shape along it, and spreads the segments that share a channel between obstacles evenly
+/// across it (a lone segment runs down the middle), at least `opts.separation` apart where the
 /// free space allows. Each entry is `None` when that connector has no route.
 ///
 /// # Errors
@@ -53,6 +55,7 @@ pub fn route_all(connectors: &[Connector], obstacles: &[Rect], opts: &RouteOptio
     let checks: Vec<Vec<Rect>> = connectors.iter().map(|c| blocking(obstacles, &c.from.rect, &c.to.rect)).collect();
     for horizontal in [true, false] {
         let before = paths.clone();
+        centre_channels(&mut paths, obstacles, opts, horizontal);
         nudge(&mut paths, obstacles, opts.separation, horizontal);
         for (i, p) in paths.iter_mut().enumerate() {
             if let Some(pts) = p {
@@ -742,4 +745,131 @@ fn nudge(paths: &mut [Option<Vec<Point>>], obstacles: &[Rect], sep: f64, horizon
             }
         }
     }
+}
+
+/// Spreads the movable segments of each channel across it (Wybrow, Marriott and Stuckey 2009,
+/// section 5): segments that run side by side between the same obstacles are ordered so they do
+/// not cross needlessly, then spaced evenly over the free width, or centred `ideal` apart when the
+/// channel is wide; a channel open on one side is filled outwards from its obstacle at
+/// `clearance`. Segments that would reverse a neighbouring segment are left alone.
+fn centre_channels(paths: &mut [Option<Vec<Point>>], obstacles: &[Rect], opts: &RouteOptions, horizontal: bool) {
+    let segs: Vec<NSeg> = collect_segs(paths, horizontal).into_iter().filter(|s| !s.fixed).collect();
+    let n = segs.len();
+    if n == 0 {
+        return;
+    }
+    let bounds: Vec<(f64, f64)> = segs
+        .iter()
+        .map(|s| {
+            let (below, above) = room(obstacles, s.at, s.lo, s.hi, horizontal);
+            (s.at - below, s.at + above)
+        })
+        .collect();
+    let ideal = (3.0 * opts.separation).max(opts.clearance);
+    for g in channel_groups(&segs, &bounds) {
+        let b0 = g.iter().map(|&i| bounds[i].0).fold(f64::NEG_INFINITY, f64::max);
+        let b1 = g.iter().map(|&i| bounds[i].1).fold(f64::INFINITY, f64::min);
+        if g.iter().any(|&i| segs[i].at < b0 - EPS || segs[i].at > b1 + EPS) {
+            continue;
+        }
+        let chans: Vec<ChannelSeg> = g.iter().map(|&i| channel_seg(paths, &segs[i], horizontal)).collect();
+        let (tracks, k) = assign_tracks(&chans, EPS);
+        let mean = g.iter().map(|&i| segs[i].at).sum::<f64>() / g.len() as f64;
+        let Some(targets) = track_places(&tracks, k, (b0, b1), mean, ideal, opts) else { continue };
+        if g.iter().zip(&targets).any(|(&i, &v)| !keeps_neighbours(paths, &segs[i], v, opts, horizontal)) {
+            continue;
+        }
+        for (&i, &v) in g.iter().zip(&targets) {
+            move_seg(paths, &segs[i], v, horizontal);
+        }
+    }
+}
+
+fn find(parent: &mut [usize], mut i: usize) -> usize {
+    while parent[i] != i {
+        parent[i] = parent[parent[i]];
+        i = parent[i];
+    }
+    i
+}
+
+/// Groups of segments whose spans overlap and that can reach each other's line without passing an
+/// obstacle: the segments sharing one channel.
+fn channel_groups(segs: &[NSeg], bounds: &[(f64, f64)]) -> Vec<Vec<usize>> {
+    let n = segs.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| segs[a].lo.total_cmp(&segs[b].lo).then(a.cmp(&b)));
+    for (x, &i) in order.iter().enumerate() {
+        for &j in &order[x + 1..] {
+            if segs[j].lo >= segs[i].hi - EPS {
+                break;
+            }
+            let (b0, b1) = (bounds[i].0.max(bounds[j].0), bounds[i].1.min(bounds[j].1));
+            if b0 <= segs[i].at.min(segs[j].at) + EPS && b1 >= segs[i].at.max(segs[j].at) - EPS {
+                let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                if ri != rj {
+                    parent[ri.max(rj)] = ri.min(rj);
+                }
+            }
+        }
+    }
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for i in 0..n {
+        let r = find(&mut parent, i);
+        groups.entry(r).or_default().push(i);
+    }
+    groups.into_values().collect()
+}
+
+fn channel_seg(paths: &[Option<Vec<Point>>], s: &NSeg, horizontal: bool) -> ChannelSeg {
+    let pts = paths[s.path].as_deref().unwrap_or(&[]);
+    let (a, b) = (s.seg, s.seg + 1);
+    let coord = |p: Option<&Point>| p.map_or(0.0, |p| if horizontal { p.x } else { p.y });
+    ChannelSeg::new((coord(pts.get(a)), turn(pts, a, a.checked_sub(1), horizontal)), (coord(pts.get(b)), turn(pts, b, Some(b + 1), horizontal)))
+}
+
+/// Where each of `k` tracks goes in the free interval `b0..b1` (either end may be unbounded).
+fn track_places(tracks: &[usize], k: usize, (b0, b1): (f64, f64), mean: f64, ideal: f64, opts: &RouteOptions) -> Option<Vec<f64>> {
+    let kf = k as f64;
+    let centred = |mid: f64, t: usize| mid + (t as f64 - (kf - 1.0) / 2.0) * ideal;
+    let place = |t: usize| -> Option<f64> {
+        match (b0.is_finite(), b1.is_finite()) {
+            (true, true) if b1 - b0 >= 2.0 * opts.clearance + (kf - 1.0) * ideal => Some(centred((b0 + b1) / 2.0, t)),
+            (true, true) => {
+                let s = (b1 - b0) / (kf + 1.0);
+                (s >= opts.separation.max(EPS)).then_some(b0 + (t as f64 + 1.0) * s)
+            }
+            (true, false) => Some(b0 + opts.clearance + t as f64 * ideal),
+            (false, true) => Some(b1 - opts.clearance - (kf - 1.0 - t as f64) * ideal),
+            (false, false) => Some(centred(mean, t)),
+        }
+    };
+    tracks.iter().map(|&t| place(t)).collect()
+}
+
+fn move_seg(paths: &mut [Option<Vec<Point>>], s: &NSeg, v: f64, horizontal: bool) {
+    if let Some(pts) = paths[s.path].as_mut() {
+        for q in [s.seg, s.seg + 1] {
+            if let Some(p) = pts.get_mut(q) {
+                if horizontal { p.y = v } else { p.x = v }
+            }
+        }
+    }
+}
+
+/// Whether moving segment `s` to `v` keeps both perpendicular neighbours pointing the way they
+/// did, and the end stubs at least `clearance` long (or as long as they were).
+fn keeps_neighbours(paths: &[Option<Vec<Point>>], s: &NSeg, v: f64, opts: &RouteOptions, horizontal: bool) -> bool {
+    let Some(pts) = paths[s.path].as_deref() else { return false };
+    let c = |p: &Point| if horizontal { p.y } else { p.x };
+    let last = pts.len().saturating_sub(1);
+    [(s.seg.checked_sub(1), s.seg), (Some(s.seg + 2), s.seg + 1)].into_iter().all(|(far, near)| {
+        let (Some(far), Some(near)) = (far.and_then(|f| pts.get(f).map(|p| (f, p))), pts.get(near)) else { return true };
+        let (fi, fp) = far;
+        let was = c(near) - c(fp);
+        let stub = fi == 0 || fi == last;
+        let need = if stub { was.abs().min(opts.clearance) } else { was.abs().min(opts.separation) };
+        (v - c(fp)) * was.signum() >= need - EPS
+    })
 }
