@@ -1,7 +1,9 @@
 //! Relations a layered layout must hold.
 
-use crate::common::{EPS, Lcg, all_finite, assert_edges_clean, assert_no_node_overlap, contains, crossings, graph, inner_overlap, node, random_dag};
-use craft_graph_layout::{Direction, EdgeSpec, Graph, GroupSpec, LayeredOptions, Layout, LayoutError, MAX_NODES, Rect, Size, layered};
+use crate::common::{
+    EPS, Lcg, all_finite, assert_edges_clean, assert_no_node_overlap, contains, crossings, graph, inner_overlap, node, path_hits, random_dag,
+};
+use craft_graph_layout::{Direction, EdgeSpec, Graph, GroupSpec, LayeredOptions, Layout, LayoutError, MAX_NODES, Point, Rect, Size, layered};
 
 fn lay(g: &Graph) -> Layout {
     layered(g, &LayeredOptions::default()).unwrap()
@@ -238,7 +240,7 @@ fn an_empty_group_still_gets_a_box_of_its_own() {
 }
 
 #[test]
-fn labels_get_room_beside_their_edges() {
+fn labels_sit_on_their_edges_clear_of_nodes_and_other_edges() {
     let mut g = graph(4, &[(0, 1), (0, 2), (1, 3), (2, 3)]);
     g.edges[0].label = Some(Size::new(60.0, 16.0));
     g.edges[3].label = Some(Size::new(40.0, 16.0));
@@ -256,6 +258,14 @@ fn labels_get_room_beside_their_edges() {
                 assert!(!inner_overlap(&r, n), "{dir:?}: label {i} covers node {v}");
             }
             assert!(contains(&Rect::new(0.0, 0.0, l.size.width, l.size.height), &r), "{dir:?}: label {i} is outside the layout");
+            let on = |a: &Point, b: &Point| {
+                let (x0, x1, y0, y1) = (a.x.min(b.x), a.x.max(b.x), a.y.min(b.y), a.y.max(b.y));
+                c.x >= x0 - EPS && c.x <= x1 + EPS && c.y >= y0 - EPS && c.y <= y1 + EPS
+            };
+            assert!(l.edges[i].windows(2).any(|w| on(&w[0], &w[1])), "{dir:?}: label {i} is off its edge: {c:?} {:?}", l.edges[i]);
+            for (j, p) in l.edges.iter().enumerate() {
+                assert!(j == i || !path_hits(p, &r), "{dir:?}: edge {j} runs through label {i}");
+            }
         }
     }
 }

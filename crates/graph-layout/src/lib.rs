@@ -257,7 +257,8 @@ pub struct Layout {
     /// One orthogonal polyline per input edge, from a point on the source rectangle's boundary
     /// to a point on the target rectangle's boundary.
     pub edges: Vec<Vec<Point>>,
-    /// The centre of each edge's label, for edges that have one. The label sits beside the edge.
+    /// The centre of each edge's label, for edges that have one. The label sits on a straight run
+    /// of its edge, clear of every node; a self-loop's label sits beside its loop.
     pub labels: Vec<Option<Point>>,
     /// The size of the bounding box of everything above.
     pub size: Size,

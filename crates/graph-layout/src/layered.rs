@@ -353,7 +353,7 @@ impl<'a> Ctx<'a> {
                 let owner = self.dummy_owner(a, b, k, &span);
                 let label = if k == ra + (rb - ra) / 2 { self.label_dims(e) } else { None };
                 let item = match label {
-                    Some((c, al)) => Item { kind: Kind::Label(e), rank: k, owner, left_ext: 0.0, right_ext: c + LABEL_GAP, along: al },
+                    Some((c, al)) => Item { kind: Kind::Label(e), rank: k, owner, left_ext: c / 2.0, right_ext: c / 2.0, along: al },
                     None => Item { kind: Kind::Dummy, rank: k, owner, left_ext: 0.0, right_ext: 0.0, along: 0.0 },
                 };
                 let id = p.push(item);
@@ -614,8 +614,8 @@ impl<'a> Ctx<'a> {
             match it.kind {
                 Kind::Node(v) if v < self.g.nodes.len() => out.nodes.push((v, self.node_rect(pl, i))),
                 Kind::Label(e) => {
-                    let w = self.label_dims(e).map_or(0.0, |d| d.0);
-                    out.labels.push((e, Point::new(pl.x[i] + LABEL_GAP + w / 2.0, pl.geo.centre(it.rank))));
+                    // The edge runs straight through its label's rank, so the label sits on it.
+                    out.labels.push((e, Point::new(pl.x[i], pl.geo.centre(it.rank))));
                 }
                 _ => {}
             }
