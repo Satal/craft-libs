@@ -1,6 +1,14 @@
 //! Crossing reduction: weighted median sweeps and transposition (Gansner et al. 1993, section 3),
 //! with each rank sorted hierarchically so every group stays one contiguous block bracketed by its
 //! border nodes, and sibling groups in the same left-to-right order on every rank.
+//!
+//! Back edges take part as reversed edges with dummy nodes, so their chains are ordered like any
+//! other edge. As Gansner et al. suggest, alternate iterations flip the order of items with equal
+//! medians and let transposition swap pairs with equal crossings, which moves such chains out of
+//! local minima (a loop's chain stuck on the far side of a branch). Among orders with the fewest
+//! crossings the one that best keeps the input order of the nodes wins: the mirror image of every
+//! rank has the same crossings, and adjacent nodes with equal crossings either way are put in
+//! input order, so authors see siblings in the order they wrote them.
 
 use crate::proper::{Kind, Proper};
 
@@ -19,7 +27,7 @@ pub(crate) fn order(p: &mut Proper) {
         let pos = p.positions();
         for r in 0..p.layers.len() {
             let keys: Vec<f64> = (0..p.items.len()).map(|v| pos[v] as f64).collect();
-            p.layers[r] = arrange(p, r, &keys, &group_key);
+            p.layers[r] = arrange(p, r, &keys, &group_key, false);
         }
         transpose(p);
         let mut cross = crossings(p);
@@ -30,7 +38,11 @@ pub(crate) fn order(p: &mut Proper) {
         let mut iter = 0;
         while iter < MAX_ITER && cross > 0 {
             refresh_group_keys(p, &mut group_key);
-            sweep(p, iter % 2 == 0, &group_key);
+            let explore = iter % 4 >= 2;
+            sweep(p, iter % 2 == 0, &group_key, explore);
+            if explore {
+                transpose_equal(p);
+            }
             transpose(p);
             cross = crossings(p);
             if cross < best_cross {
@@ -45,6 +57,89 @@ pub(crate) fn order(p: &mut Proper) {
     }
     if let Some(layers) = best_layers {
         p.layers = layers;
+    }
+    prefer_input_order(p);
+}
+
+/// Inversions of the input order of real nodes, per rank from the top.
+fn disorder(p: &Proper) -> Vec<u64> {
+    p.layers
+        .iter()
+        .map(|layer| {
+            let ids: Vec<usize> = layer.iter().filter_map(|&v| if let Kind::Node(i) = p.items[v].kind { Some(i) } else { None }).collect();
+            let mut c = 0u64;
+            for i in 0..ids.len() {
+                for j in i + 1..ids.len() {
+                    if ids[i] > ids[j] {
+                        c += 1;
+                    }
+                }
+            }
+            c
+        })
+        .collect()
+}
+
+/// Mirrors every rank when that keeps the input order better (the crossings are the same), then
+/// swaps adjacent nodes into input order where that leaves the crossings unchanged.
+fn prefer_input_order(p: &mut Proper) {
+    let before = disorder(p);
+    let original = p.layers.clone();
+    for layer in &mut p.layers {
+        layer.reverse();
+    }
+    mirror_borders(p);
+    if disorder(p) >= before {
+        p.layers = original;
+    }
+    let mut pos = p.positions();
+    for _ in 0..MAX_TRANSPOSE_PASSES {
+        let mut changed = false;
+        for r in 0..p.layers.len() {
+            for i in 0..p.layers[r].len().saturating_sub(1) {
+                let (v, w) = (p.layers[r][i], p.layers[r][i + 1]);
+                let (iv, iw) = (&p.items[v], &p.items[w]);
+                let (Kind::Node(a), Kind::Node(b)) = (iv.kind, iw.kind) else { continue };
+                if a < b || iv.owner != iw.owner {
+                    continue;
+                }
+                let (before, after) = swap_costs(p, v, w, &pos);
+                if after <= before {
+                    p.layers[r].swap(i, i + 1);
+                    pos[v] = i + 1;
+                    pos[w] = i;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// After reversing every rank each group's right border comes first: swap the two back.
+fn mirror_borders(p: &mut Proper) {
+    for layer in &mut p.layers {
+        let mut at: Vec<(usize, Option<usize>, Option<usize>)> = Vec::new();
+        for (i, &v) in layer.iter().enumerate() {
+            match p.items[v].kind {
+                Kind::BorderL(g) => match at.iter_mut().find(|a| a.0 == g) {
+                    Some(a) => a.1 = Some(i),
+                    None => at.push((g, Some(i), None)),
+                },
+                Kind::BorderR(g) => match at.iter_mut().find(|a| a.0 == g) {
+                    Some(a) => a.2 = Some(i),
+                    None => at.push((g, None, Some(i))),
+                },
+                _ => {}
+            }
+        }
+        for (_, l, r) in at {
+            if let (Some(l), Some(r)) = (l, r) {
+                layer.swap(l, r);
+            }
+        }
     }
 }
 
@@ -100,7 +195,7 @@ fn refresh_group_keys(p: &Proper, key: &mut [f64]) {
     }
 }
 
-fn sweep(p: &mut Proper, down: bool, group_key: &[f64]) {
+fn sweep(p: &mut Proper, down: bool, group_key: &[f64], flip_ties: bool) {
     let h = p.layers.len();
     if h == 0 {
         return;
@@ -119,7 +214,7 @@ fn sweep(p: &mut Proper, down: bool, group_key: &[f64]) {
                 }
             }
         }
-        p.layers[r] = arrange(p, r, &keys, group_key);
+        p.layers[r] = arrange(p, r, &keys, group_key, flip_ties);
         for (i, &v) in p.layers[r].iter().enumerate() {
             pos[v] = i;
         }
@@ -150,8 +245,9 @@ enum Child {
 }
 
 /// Sorts layer `r` by `keys`, keeping groups contiguous, bracketed by their borders and in the
-/// sibling order given by `group_key`.
-fn arrange(p: &Proper, r: usize, keys: &[f64], group_key: &[f64]) -> Vec<usize> {
+/// sibling order given by `group_key`. Equal keys keep their current order, or reverse it with
+/// `flip_ties`.
+fn arrange(p: &Proper, r: usize, keys: &[f64], group_key: &[f64], flip_ties: bool) -> Vec<usize> {
     let groups = p.group_parent.len();
     // Slot 0 is the root, slot g + 1 is group g.
     let mut children: Vec<Vec<Child>> = vec![Vec::new(); groups + 1];
@@ -170,7 +266,7 @@ fn arrange(p: &Proper, r: usize, keys: &[f64], group_key: &[f64]) -> Vec<usize> 
         }
     }
     let mut out = Vec::with_capacity(p.layers[r].len());
-    emit(0, &children, &borders, keys, group_key, &mut out, 0);
+    Tree { children: &children, borders: &borders, keys, group_key, flip_ties }.emit(0, &mut out, 0);
     // Anything not reached (a group whose parent has no borders here) keeps its place at the end.
     if out.len() < p.layers[r].len() {
         let mut placed = vec![false; p.items.len()];
@@ -186,60 +282,63 @@ fn arrange(p: &Proper, r: usize, keys: &[f64], group_key: &[f64]) -> Vec<usize> 
     out
 }
 
-/// Appends the ordered contents of `slot` to `out`; returns the sum and count of item keys.
-fn emit(
-    slot: usize,
-    children: &[Vec<Child>],
-    borders: &[(Option<usize>, Option<usize>)],
-    keys: &[f64],
-    group_key: &[f64],
-    out: &mut Vec<usize>,
-    depth: usize,
-) -> (f64, usize) {
-    let kids = &children[slot];
-    let mut sorted: Vec<(f64, usize, Child, Vec<usize>)> = Vec::with_capacity(kids.len());
-    let (mut sum, mut cnt) = (0.0, 0usize);
-    for (i, &c) in kids.iter().enumerate() {
-        match c {
-            Child::Item(v) => {
-                sum += keys[v];
-                cnt += 1;
-                sorted.push((keys[v], i, c, vec![v]));
-            }
-            Child::Group(g) => {
-                let mut seq = Vec::new();
-                let (s, k) =
-                    if depth < crate::MAX_GROUP_DEPTH + 1 { emit(g + 1, children, borders, keys, group_key, &mut seq, depth + 1) } else { (0.0, 0) };
-                sum += s;
-                cnt += k;
-                let fallback = borders[g].0.map_or(0.0, |b| keys[b]);
-                let key = if k > 0 { s / k as f64 } else { fallback };
-                let mut block = Vec::with_capacity(seq.len() + 2);
-                block.extend(borders[g].0);
-                block.extend(seq);
-                block.extend(borders[g].1);
-                sorted.push((key, i, c, block));
+/// One rank as a tree of groups, with the keys to sort it by.
+struct Tree<'a> {
+    children: &'a [Vec<Child>],
+    borders: &'a [(Option<usize>, Option<usize>)],
+    keys: &'a [f64],
+    group_key: &'a [f64],
+    flip_ties: bool,
+}
+
+impl Tree<'_> {
+    /// Appends the ordered contents of `slot` to `out`; returns the sum and count of item keys.
+    fn emit(&self, slot: usize, out: &mut Vec<usize>, depth: usize) -> (f64, usize) {
+        let (children, borders, keys, group_key, flip_ties) = (self.children, self.borders, self.keys, self.group_key, self.flip_ties);
+        let kids = &children[slot];
+        let mut sorted: Vec<(f64, usize, Child, Vec<usize>)> = Vec::with_capacity(kids.len());
+        let (mut sum, mut cnt) = (0.0, 0usize);
+        for (i, &c) in kids.iter().enumerate() {
+            match c {
+                Child::Item(v) => {
+                    sum += keys[v];
+                    cnt += 1;
+                    sorted.push((keys[v], i, c, vec![v]));
+                }
+                Child::Group(g) => {
+                    let mut seq = Vec::new();
+                    let (s, k) = if depth < crate::MAX_GROUP_DEPTH + 1 { self.emit(g + 1, &mut seq, depth + 1) } else { (0.0, 0) };
+                    sum += s;
+                    cnt += k;
+                    let fallback = borders[g].0.map_or(0.0, |b| keys[b]);
+                    let key = if k > 0 { s / k as f64 } else { fallback };
+                    let mut block = Vec::with_capacity(seq.len() + 2);
+                    block.extend(borders[g].0);
+                    block.extend(seq);
+                    block.extend(borders[g].1);
+                    sorted.push((key, i, c, block));
+                }
             }
         }
+        sorted.sort_by(|a, b| a.0.total_cmp(&b.0).then(if flip_ties { b.1.cmp(&a.1) } else { a.1.cmp(&b.1) }));
+        // Groups keep their sibling order: refill the slots groups landed in, in group-key order.
+        let slots: Vec<usize> = sorted.iter().enumerate().filter(|(_, s)| matches!(s.2, Child::Group(_))).map(|(i, _)| i).collect();
+        let mut gs: Vec<(f64, usize, Vec<usize>)> = slots
+            .iter()
+            .filter_map(|&i| match sorted[i].2 {
+                Child::Group(g) => Some((group_key[g], g, std::mem::take(&mut sorted[i].3))),
+                Child::Item(_) => None,
+            })
+            .collect();
+        gs.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        for (&slot_i, g) in slots.iter().zip(gs) {
+            sorted[slot_i].3 = g.2;
+        }
+        for s in sorted {
+            out.extend(s.3);
+        }
+        (sum, cnt)
     }
-    sorted.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-    // Groups keep their sibling order: refill the slots groups landed in, in group-key order.
-    let slots: Vec<usize> = sorted.iter().enumerate().filter(|(_, s)| matches!(s.2, Child::Group(_))).map(|(i, _)| i).collect();
-    let mut gs: Vec<(f64, usize, Vec<usize>)> = slots
-        .iter()
-        .filter_map(|&i| match sorted[i].2 {
-            Child::Group(g) => Some((group_key[g], g, std::mem::take(&mut sorted[i].3))),
-            Child::Item(_) => None,
-        })
-        .collect();
-    gs.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-    for (&slot_i, g) in slots.iter().zip(gs) {
-        sorted[slot_i].3 = g.2;
-    }
-    for s in sorted {
-        out.extend(s.3);
-    }
-    (sum, cnt)
 }
 
 /// Crossings between the segments of `a` and `b` (a left of b) and one neighbouring layer.
@@ -267,8 +366,7 @@ fn transpose(p: &mut Proper) {
                 if iv.is_border() || iw.is_border() || iv.owner != iw.owner {
                     continue;
                 }
-                let before = pair_crossings(&p.up[v], &p.up[w], &pos) + pair_crossings(&p.down[v], &p.down[w], &pos);
-                let after = pair_crossings(&p.up[w], &p.up[v], &pos) + pair_crossings(&p.down[w], &p.down[v], &pos);
+                let (before, after) = swap_costs(p, v, w, &pos);
                 if after < before {
                     p.layers[r].swap(i, i + 1);
                     pos[v] = i + 1;
@@ -279,6 +377,36 @@ fn transpose(p: &mut Proper) {
         }
         if !improved {
             break;
+        }
+    }
+}
+
+/// Crossings at `v` and its right neighbour `w` as they are, and swapped.
+fn swap_costs(p: &Proper, v: usize, w: usize, pos: &[usize]) -> (u64, u64) {
+    let before = pair_crossings(&p.up[v], &p.up[w], pos) + pair_crossings(&p.down[v], &p.down[w], pos);
+    let after = pair_crossings(&p.up[w], &p.up[v], pos) + pair_crossings(&p.down[w], &p.down[v], pos);
+    (before, after)
+}
+
+/// One pass that swaps neighbours with the same owner whose crossings are equal either way (and
+/// not zero), to leave a local minimum.
+fn transpose_equal(p: &mut Proper) {
+    let mut pos = p.positions();
+    for r in 0..p.layers.len() {
+        let mut i = 0;
+        while i + 1 < p.layers[r].len() {
+            let (v, w) = (p.layers[r][i], p.layers[r][i + 1]);
+            let (iv, iw) = (&p.items[v], &p.items[w]);
+            if !iv.is_border() && !iw.is_border() && iv.owner == iw.owner {
+                let (before, after) = swap_costs(p, v, w, &pos);
+                if before > 0 && after == before {
+                    p.layers[r].swap(i, i + 1);
+                    pos[v] = i + 1;
+                    pos[w] = i;
+                    i += 1;
+                }
+            }
+            i += 1;
         }
     }
 }

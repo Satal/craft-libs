@@ -332,3 +332,47 @@ fn the_empty_graph_is_empty() {
     assert!(l.nodes.is_empty() && l.edges.is_empty());
     assert_eq!(l.size, Size::default());
 }
+
+/// The example flowchart: a validation loop (Show error back to Read input) and a retry loop
+/// (Wait back to Transform), with labelled branches. It has a drawing without crossings: each
+/// loop's back edge runs up beside the nodes it spans, on the side away from the other branch.
+fn loops_flowchart() -> Graph {
+    let mut g = graph(12, &[(0, 1), (1, 2), (2, 3), (3, 1), (2, 4), (4, 5), (5, 6), (6, 7), (7, 5), (6, 8), (8, 9), (8, 10), (9, 11), (10, 11)]);
+    for (e, w) in [(2, 30.0), (4, 37.0), (7, 37.0), (9, 30.0)] {
+        g.edges[e].label = Some(Size::new(w, 16.0));
+    }
+    g
+}
+
+#[test]
+fn back_edges_wrap_their_loops_without_crossing_other_edges() {
+    let g = loops_flowchart();
+    for dir in [Direction::Down, Direction::Right] {
+        let l = layered(&g, &LayeredOptions { direction: dir, ..LayeredOptions::default() }).unwrap();
+        assert_edges_clean(&g, &l);
+        assert_eq!(crossings(&l.edges), 0, "{dir:?}: a crossing-free drawing exists: {:?}", l.edges);
+    }
+}
+
+#[test]
+fn siblings_keep_their_input_order_when_crossings_tie() {
+    // User -> LB -> {Web 1, Web 2} -> DB -> Replica, Web 1 -> Cache; Web 1 and Web 2 share a group.
+    let mut g = graph(7, &[(0, 1), (1, 2), (1, 3), (2, 4), (3, 4), (4, 5), (2, 6), (4, 6)]);
+    g.groups = vec![
+        GroupSpec { parent: None, padding: 10.0, title_height: 20.0 },
+        GroupSpec { parent: Some(0), padding: 10.0, title_height: 20.0 },
+        GroupSpec { parent: Some(0), padding: 10.0, title_height: 20.0 },
+    ];
+    for (v, grp) in [(1, 0), (2, 1), (3, 1), (4, 2), (5, 2)] {
+        g.nodes[v].group = Some(grp);
+    }
+    for dir in [Direction::Down, Direction::Right] {
+        let l = layered(&g, &LayeredOptions { direction: dir, ..LayeredOptions::default() }).unwrap();
+        let (a, b) = (l.nodes[2].center(), l.nodes[3].center());
+        let first = if dir == Direction::Down { a.x < b.x } else { a.y < b.y };
+        assert!(first, "{dir:?}: node 2 should come before node 3: {a:?} {b:?}");
+    }
+    // Plain fan-outs too.
+    let l = lay(&graph(4, &[(0, 1), (0, 2), (0, 3)]));
+    assert!(l.nodes[1].x < l.nodes[2].x && l.nodes[2].x < l.nodes[3].x, "{:?}", l.nodes);
+}
