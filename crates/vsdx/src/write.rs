@@ -5,9 +5,9 @@ use std::collections::{HashMap, HashSet};
 use craft_opc::{PackageOut, RelsOut};
 use craft_xml::Writer;
 
-use crate::Error;
 use crate::geom::PT;
 use crate::model::{ConnectionPoint, Connector, Drawing, GeomPath, Page, Point, Rgba, Segment, Shape};
+use crate::{Error, Warning, WarningKind};
 
 const NS_CORE: &str = "http://schemas.microsoft.com/office/visio/2011/1/core";
 const NS_R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -18,9 +18,12 @@ const CT_PAGE: &str = "application/vnd.ms-visio.page+xml";
 /// The first shape ID the writer hands out when it renumbers (conflict c2 in the crate docs).
 const FIRST_ID: u32 = 4;
 
-/// Writes a drawing as a `.vsdx` package.
-pub fn write(drawing: &Drawing) -> Result<Vec<u8>, Error> {
+/// Writes a drawing as a `.vsdx` package, with a warning for each connector end it could not
+/// glue: one glued to a shape that is not on its page, or to a connection point the shape
+/// does not have, is written free.
+pub fn write(drawing: &Drawing) -> Result<(Vec<u8>, Vec<Warning>), Error> {
     check(drawing)?;
+    let mut warnings = Vec::new();
     let mut pkg = PackageOut::default();
     let mut root = RelsOut::default();
     root.add(&format!("{RT_VISIO}document"), "visio/document.xml", false);
@@ -36,11 +39,11 @@ pub fn write(drawing: &Drawing) -> Result<Vec<u8>, Error> {
         let rid = pages_rels.add(&format!("{RT_VISIO}page"), &file, false);
         let (w, h) = page_size(page);
         entries.push((page_name(page, i), w, h, rid));
-        pkg.xml_part(&format!("visio/pages/{file}"), CT_PAGE, page_contents(page, h)?);
+        pkg.xml_part(&format!("visio/pages/{file}"), CT_PAGE, page_contents(page, h, &mut warnings)?);
     }
     pkg.xml_part("visio/pages/pages.xml", CT_PAGES, pages(&entries));
     pkg.rels("visio/pages/pages.xml", &pages_rels);
-    Ok(pkg.finish()?)
+    Ok((pkg.finish()?, warnings))
 }
 
 fn finite(v: f64, what: &str) -> Result<(), Error> {
@@ -231,21 +234,34 @@ fn ids(page: &Page) -> Result<Ids, Error> {
     Ok(Ids { shapes: out, connectors, map })
 }
 
-fn page_contents(page: &Page, ph: f64) -> Result<Vec<u8>, Error> {
+fn page_contents(page: &Page, ph: f64, warnings: &mut Vec<Warning>) -> Result<Vec<u8>, Error> {
     let Ids { shapes: shape_ids, connectors: connector_ids, map } = ids(page)?;
     let points: HashMap<u32, usize> = page.shapes.iter().zip(&shape_ids).map(|(s, &id)| (id, s.connections.len())).collect();
     let mut glue = Vec::new();
     for c in &page.connectors {
-        let resolve = |g: &Option<(u32, ConnectionPoint)>| -> Result<Option<(u32, ConnectionPoint)>, Error> {
-            let Some((id, at)) = g else { return Ok(None) };
-            let new = map
-                .get(id)
-                .copied()
-                .filter(|n| points.contains_key(n))
-                .ok_or_else(|| Error::Invalid(format!("connector {} is glued to shape {id}, which is not on its page", c.id)))?;
-            Ok(Some((new, *at)))
+        let mut resolve = |g: &Option<(u32, ConnectionPoint)>, end: &str| -> Option<(u32, ConnectionPoint)> {
+            let (id, at) = (*g)?;
+            let mut free = |why: String| {
+                let place = crate::values::short(&page.name);
+                warnings.push(Warning {
+                    kind: WarningKind::Missing,
+                    place,
+                    message: format!("connector {}: its {end} is glued to {why}; written free", c.id),
+                });
+            };
+            let Some((new, count)) = map.get(&id).and_then(|n| Some((*n, *points.get(n)?))) else {
+                free(format!("shape {id}, which is not on its page"));
+                return None;
+            };
+            if let ConnectionPoint::Point(k) = at
+                && !usize::try_from(k).is_ok_and(|k| (1..=count).contains(&k))
+            {
+                free(format!("connection point {k} of shape {id}, which has {count}"));
+                return None;
+            }
+            Some((new, at))
         };
-        glue.push((resolve(&c.from)?, resolve(&c.to)?));
+        glue.push((resolve(&c.from, "begin"), resolve(&c.to, "end")));
     }
     let mut w = Writer::document();
     root(&mut w, "PageContents");

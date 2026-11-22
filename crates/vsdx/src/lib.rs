@@ -36,6 +36,12 @@
 //!   are glued through `Connects` (§2.3.4.2.12), or else through a `Sheet.<id>!` reference in
 //!   the endpoint formula.
 //!
+//! Connector glue is made to say what the model has: glue to a shape that is not in the
+//! model (a guide, a group that has no shape of its own, a deleted shape) is dropped, and glue
+//! to `Connections.X<n>` is matched to the connection row with `IX = n - 1` even when the
+//! numbering has gaps, each with a warning. [`write`] writes glue it cannot resolve free and
+//! says so.
+//!
 //! Everything else that changes the picture is reported as a [`Warning`]: NURBS, polyline and
 //! spline rows (drawn as their chord), infinite lines, fill patterns other than solid, theme
 //! colours (`V="themed"`, drawn black or white), unknown units, unreadable numbers, foreign
@@ -93,7 +99,10 @@
 //! # Limits
 //!
 //! [`Limits`] caps the package (entries, bytes per part, bytes in all), the XML (depth and
-//! nodes), the pages, masters and shapes, and how deep groups nest. A package over a limit
+//! nodes), the pages, masters and shapes, how deep groups nest, and the shapes and rows
+//! copied from masters into instances (twice [`Limits::max_shapes`] plus [`Limits::max_rows`]
+//! across a read; charged before the copy). Shape names are cut to 256 characters and icons
+//! to 1 MB each and 32 MB in all, with a warning. A package over a limit
 //! is refused with an error that says so ([`Error::is_limit`]); groups deeper than the limit
 //! are cut with a warning.
 //!

@@ -3,7 +3,7 @@
 use crate::WarningKind;
 use crate::model::{GeomPath, Point, Segment};
 use crate::sheet::{Row, Section, Sheet};
-use crate::values::{Sink, angle, length, scalar};
+use crate::values::{MAX_LENGTH, Sink, angle, length, scalar};
 
 /// Points per inch.
 pub(crate) const PT: f64 = 72.0;
@@ -80,7 +80,7 @@ fn len(r: &Row, n: &str, ctx: &mut Ctx) -> f64 {
 }
 
 fn rel(r: &Row, n: &str, size: f64, ctx: &mut Ctx) -> f64 {
-    scalar(r.cells.get(n), ctx.sink, ctx.place, n).unwrap_or(0.0) * size
+    (scalar(r.cells.get(n), ctx.sink, ctx.place, n).unwrap_or(0.0) * size).clamp(-MAX_LENGTH, MAX_LENGTH)
 }
 
 /// The bow of an ArcTo as a point on the arc: `bow` to the left of the chord's middle.

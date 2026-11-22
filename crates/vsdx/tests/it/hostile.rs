@@ -8,7 +8,7 @@ use crate::{flowchart, package, page_xml};
 
 fn written() -> Vec<u8> {
     match write(&flowchart()) {
-        Ok(b) => b,
+        Ok((b, _)) => b,
         Err(e) => panic!("write: {e}"),
     }
 }
@@ -147,4 +147,104 @@ fn lengths_too_large_to_scale_stay_finite() {
     let shapes = r#"<Shape ID="1"><Cell N="PinX" V="1e308"/><Cell N="Width" V="1e308"/><Cell N="Height" V="1" U="MI"/><Section N="Geometry"><Row T="MoveTo"><Cell N="X" V="1e308"/><Cell N="Y" V="0"/></Row></Section></Shape>"#;
     let r = read(&package("", &[page_xml(shapes, "")], &[]));
     assert!(r.is_ok_and(|(d, _)| d.pages[0].shapes.iter().all(|s| [s.x, s.y, s.width, s.height].iter().all(|v| v.is_finite()))));
+}
+
+/// Every coordinate a shape holds, to check none is infinite or NaN.
+fn all_finite(s: &craft_vsdx::Shape) -> bool {
+    use craft_vsdx::Segment;
+    let mut v = vec![s.x, s.y, s.width, s.height, s.angle, s.line_weight];
+    v.extend(s.connections.iter().flat_map(|p| [p.0, p.1]));
+    for seg in s.geometry.iter().flat_map(|g| &g.segments) {
+        match *seg {
+            Segment::MoveTo(p) | Segment::LineTo(p) => v.extend([p.0, p.1]),
+            Segment::CubicTo { c1, c2, to } => v.extend([c1.0, c1.1, c2.0, c2.1, to.0, to.1]),
+            Segment::ArcTo { to, via, rotation, ratio } => v.extend([to.0, to.1, via.0, via.1, rotation, ratio]),
+            Segment::Ellipse { centre, a, b } => v.extend([centre.0, centre.1, a.0, a.1, b.0, b.1]),
+        }
+    }
+    v.iter().all(|x| x.is_finite())
+}
+
+#[test]
+fn huge_relative_geometry_stays_finite() {
+    let big = r#"<Cell N="X" V="1e308"/><Cell N="Y" V="-1e308"/><Cell N="A" V="1e308"/><Cell N="B" V="1e308"/><Cell N="C" V="1e308"/><Cell N="D" V="1e308"/>"#;
+    let rows: String =
+        ["RelMoveTo", "RelLineTo", "RelCubBezTo", "RelQuadBezTo", "RelEllipticalArcTo", "EllipticalArcTo", "ArcTo", "Ellipse", "NURBSTo"]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| format!(r#"<Row T="{t}" IX="{}">{big}</Row>"#, i + 1))
+            .collect();
+    let shapes = format!(
+        r#"<Shape ID="1"><Cell N="Width" V="1e308"/><Cell N="Height" V="1e300"/><Cell N="Angle" V="1e308"/><Section N="Geometry">{rows}</Section>
+        <Section N="Connection"><Row IX="0"><Cell N="X" V="1e308"/><Cell N="Y" V="1e308"/></Row></Section></Shape>"#
+    );
+    let r = read(&package("", &[page_xml(&shapes, "")], &[]));
+    assert!(r.is_ok_and(|(d, _)| d.pages[0].shapes.len() == 1 && d.pages[0].shapes.iter().all(all_finite)));
+}
+
+#[test]
+fn a_big_master_instanced_many_times_is_refused_before_it_is_copied() {
+    let sub = |i: usize| {
+        let rows: String = (1..=100).map(|r| format!(r#"<Row T="LineTo" IX="{r}"><Cell N="X" V="{r}"/><Cell N="Y" V="1"/></Row>"#)).collect();
+        format!(r#"<Shape ID="{i}"><Cell N="Width" V="1"/><Section N="Geometry">{rows}</Section></Shape>"#)
+    };
+    let subs: String = (1..=300).map(sub).collect();
+    let master =
+        format!(r#"{}<Shapes><Shape ID="1" Type="Group"><Shapes>{subs}</Shapes></Shape></Shapes></MasterContents>"#, crate::root("MasterContents"));
+    let instances: String = (100..400).map(|i| format!(r#"<Shape ID="{i}" Master="1"/>"#)).collect();
+    let bytes = package("", &[page_xml(&instances, "")], &[("ID=\"1\"", master.clone())]);
+    let started = std::time::Instant::now();
+    assert!(read(&bytes).is_err_and(|e| e.is_limit()));
+    assert!(started.elapsed() < std::time::Duration::from_secs(20), "refused quickly");
+    // A few instances of the same master are fine.
+    let few: String = (100..103).map(|i| format!(r#"<Shape ID="{i}" Master="1"/>"#)).collect();
+    assert!(read(&package("", &[page_xml(&few, "")], &[("ID=\"1\"", master)])).is_ok_and(|(d, _)| d.pages[0].shapes.len() >= 900));
+}
+
+#[test]
+fn huge_names_are_cut_in_the_model_and_in_warnings() {
+    let name = "n".repeat(200_000);
+    let shapes = format!(r#"<Shape ID="1" NameU="{name}"><Cell N="Width" V="abc"/></Shape>"#);
+    let (d, w) = match read(&package("", &[page_xml(&shapes, "")], &[("ID=\"1\" NameU=\"x\"", page_xml("", ""))])) {
+        Ok(r) => r,
+        Err(e) => panic!("read: {e}"),
+    };
+    assert!(d.pages[0].shapes[0].name.chars().count() < 1_000);
+    assert!(w.iter().all(|w| w.place.len() < 500), "no warning carries a whole name");
+    assert!(w.iter().any(|w| w.kind == WarningKind::Limit), "the cut is reported");
+}
+
+fn png(extra: usize) -> Vec<u8> {
+    let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
+    b.resize(b.len() + extra, 0);
+    b
+}
+
+fn stencil_icons(icons: &[(usize, &str, Vec<u8>)]) -> (craft_vsdx::Stencil, Vec<craft_vsdx::Warning>) {
+    let master = format!(
+        r#"{}<Shapes><Shape ID="1"><Cell N="Width" V="1"/><Cell N="Height" V="1"/></Shape></Shapes></MasterContents>"#,
+        crate::root("MasterContents")
+    );
+    let masters = [("ID=\"1\" NameU=\"A\"", master.clone()), ("ID=\"2\" NameU=\"B\"", master.clone()), ("ID=\"3\" NameU=\"C\"", master)];
+    match read_stencil(&crate::package_with_icons("", &[], &masters, icons)) {
+        Ok(r) => r,
+        Err(e) => panic!("stencil: {e}"),
+    }
+}
+
+#[test]
+fn icons_are_checked_capped_and_shared() {
+    let (s, w) = stencil_icons(&[(0, "a.png", png(10)), (1, "a.png", png(10)), (2, "b.png", b"not an image".to_vec())]);
+    let (a, b, c) = (&s.masters[0].icon_png, &s.masters[1].icon_png, &s.masters[2].icon_png);
+    assert!(matches!((a, b), (Some(a), Some(b)) if std::sync::Arc::ptr_eq(a, b)), "one part, one copy");
+    assert!(c.is_none() && w.iter().any(|w| w.kind == WarningKind::BadValue), "a .png that is not a PNG is refused and reported");
+    let (s, w) = stencil_icons(&[(0, "big.png", png(2 * 1024 * 1024))]);
+    assert!(s.masters[0].icon_png.is_none() && w.iter().any(|w| w.kind == WarningKind::Limit));
+}
+
+#[test]
+fn icons_are_over_a_total_budget() {
+    let icons: Vec<(usize, &str, Vec<u8>)> = vec![(0, "1.png", png(900_000)), (1, "2.png", png(900_000)), (2, "3.png", png(900_000))];
+    let (s, _) = stencil_icons(&icons);
+    assert_eq!(s.masters.iter().filter(|m| m.icon_png.is_some()).count(), 3, "within the total, all are kept");
 }

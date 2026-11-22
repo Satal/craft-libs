@@ -171,8 +171,9 @@ pub struct Master {
     pub height: f64,
     /// The master's shapes, flattened, in a space whose top-left is the bounding box's.
     pub shapes: Vec<Shape>,
-    /// A PNG image the master part relates to, when there is one.
-    pub icon_png: Option<Vec<u8>>,
+    /// A PNG image the master part relates to, when there is one: at most 1 MB, starting
+    /// like a PNG, and shared by the masters that relate to the same part.
+    pub icon_png: Option<std::sync::Arc<[u8]>>,
 }
 
 impl GeomPath {

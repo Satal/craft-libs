@@ -1,6 +1,7 @@
 //! The integration tests of craft-vsdx, one binary. Every fixture is built by the test code
 //! itself: drawings through [`craft_vsdx::write`], hand-made packages through [`package`].
 
+mod glue;
 mod hostile;
 mod inherit;
 mod roundtrip;
@@ -25,6 +26,12 @@ pub fn page_xml(shapes: &str, connects: &str) -> String {
 /// A package with the given page parts, and masters (the `<Master>` attributes and the
 /// MasterContents XML of each) when there are any.
 pub fn package(document_extra: &str, pages: &[String], masters: &[(&str, String)]) -> Vec<u8> {
+    package_with_icons(document_extra, pages, masters, &[])
+}
+
+/// [`package`] with images: `(master index, image part name, bytes)`, related to the master part.
+/// Masters naming the same part share it.
+pub fn package_with_icons(document_extra: &str, pages: &[String], masters: &[(&str, String)], icons: &[(usize, &str, Vec<u8>)]) -> Vec<u8> {
     let mut pkg = PackageOut::default();
     let mut rels = RelsOut::default();
     rels.add(&format!("{RT}document"), "visio/document.xml", false);
@@ -56,6 +63,17 @@ pub fn package(document_extra: &str, pages: &[String], masters: &[(&str, String)
             let rid = mrels.add(&format!("{RT}master"), &format!("master{i}.xml"), false);
             list += &format!(r#"<Master {attrs}><Rel r:id="{rid}"/></Master>"#);
             pkg.xml_part(&format!("visio/masters/master{i}.xml"), "application/vnd.ms-visio.master+xml", contents.clone().into_bytes());
+            let mut image_rels = RelsOut::default();
+            for (_, part, _) in icons.iter().filter(|(m, ..)| *m == i) {
+                image_rels.add(&format!("{NS_R}/image"), &format!("../media/{part}"), false);
+            }
+            pkg.rels(&format!("visio/masters/master{i}.xml"), &image_rels);
+        }
+        let mut added = std::collections::HashSet::new();
+        for (_, part, bytes) in icons {
+            if added.insert(*part) {
+                pkg.binary(&format!("visio/media/{part}"), "image/png", bytes.clone());
+            }
         }
         list += "</Masters>";
         pkg.xml_part("visio/masters/masters.xml", "application/vnd.ms-visio.masters+xml", list.into_bytes());

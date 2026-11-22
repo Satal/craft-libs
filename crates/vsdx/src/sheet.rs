@@ -136,13 +136,31 @@ fn u32_attr(el: &El, name: &str) -> Option<u32> {
     el.attr(name).and_then(|v| v.trim().parse().ok())
 }
 
+/// Longest shape name kept, in characters: a longer one is cut, because every instance of a
+/// master copies the names of the master's shapes.
+pub(crate) const MAX_NAME: usize = 256;
+
+/// What reading cut short.
+#[derive(Default)]
+pub(crate) struct Cuts {
+    /// Sub-shapes left out below the group depth limit.
+    pub depth: bool,
+    /// A shape name cut to [`MAX_NAME`].
+    pub name: bool,
+}
+
 /// Reads a `Shape` element and its sub-shapes. `depth` counts the groups above it; past
-/// `max_depth` sub-shapes are left out and `cut` is set.
-pub(crate) fn raw_shape(el: &El, depth: usize, max_depth: usize, cut: &mut bool) -> RawShape {
+/// `max_depth` sub-shapes are left out and `cuts.depth` is set.
+pub(crate) fn raw_shape(el: &El, depth: usize, max_depth: usize, cuts: &mut Cuts) -> RawShape {
+    let mut name = el.attr("NameU").or_else(|| el.attr("Name")).unwrap_or("").to_string();
+    if let Some((at, _)) = name.char_indices().nth(MAX_NAME) {
+        name.truncate(at);
+        cuts.name = true;
+    }
     let mut s = RawShape {
         id: u32_attr(el, "ID").unwrap_or(0),
         kind: el.attr("Type").unwrap_or("Shape").to_string(),
-        name: el.attr("NameU").or_else(|| el.attr("Name")).unwrap_or("").to_string(),
+        name,
         master: u32_attr(el, "Master"),
         master_shape: u32_attr(el, "MasterShape"),
         del: el.flag("Del", false),
@@ -155,12 +173,22 @@ pub(crate) fn raw_shape(el: &El, depth: usize, max_depth: usize, cut: &mut bool)
     };
     if let Some(shapes) = el.child("Shapes") {
         if depth >= max_depth {
-            *cut = true;
+            cuts.depth = true;
         } else {
-            s.subs = shapes.children("Shape").map(|c| raw_shape(c, depth + 1, max_depth, cut)).collect();
+            s.subs = shapes.children("Shape").map(|c| raw_shape(c, depth + 1, max_depth, cuts)).collect();
         }
     }
     s
+}
+
+impl RawShape {
+    /// The work copying this shape and its sub-shapes costs: one per shape, one per geometry
+    /// or other section row, and one per 256 bytes of text.
+    pub fn weight(&self) -> usize {
+        let rows: usize = self.sheet.sections.values().map(|s| s.rows.len()).sum();
+        let text = self.text.as_ref().map_or(0, |t| t.len() / 256);
+        self.subs.iter().fold(1usize.saturating_add(rows).saturating_add(text), |w, c| w.saturating_add(c.weight()))
+    }
 }
 
 fn merge_cells(local: &BTreeMap<String, Cell>, base: &BTreeMap<String, Cell>) -> BTreeMap<String, Cell> {

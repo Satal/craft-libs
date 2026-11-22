@@ -12,7 +12,7 @@ fn close(a: f64, b: f64) -> bool {
 
 fn roundtrip(d: &Drawing) -> Drawing {
     let bytes = match write(d) {
-        Ok(b) => b,
+        Ok((b, _)) => b,
         Err(e) => panic!("write: {e}"),
     };
     match read(&bytes) {
@@ -124,6 +124,6 @@ fn bad_models_are_refused_not_written() {
     d.pages[0].shapes[0].x = f64::NAN;
     assert!(write(&d).is_err());
     let mut d = flowchart();
-    d.pages[0].connectors[0].to = Some((999, craft_vsdx::ConnectionPoint::Shape));
+    d.pages[0].connectors[0].points.truncate(1);
     assert!(write(&d).is_err());
 }

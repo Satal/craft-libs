@@ -1,14 +1,15 @@
 //! Reading drawings and stencils.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use craft_opc::Package;
 use craft_xml::{El, Options};
 
 use crate::geom::{Affine, Ctx, PT, paths, vertices};
 use crate::model::{ConnectionPoint, Connector, Drawing, Master, Page, Point, Rgba, Shape, Stencil};
-use crate::sheet::{Cell, RawShape, RowKey, Sheet, merge_shape, raw_shape, sheet};
-use crate::values::{Colour, Sink, Style, Styles, View, angle, colour, length, scalar};
+use crate::sheet::{Cell, Cuts, MAX_NAME, RawShape, RowKey, Sheet, merge_shape, raw_shape, sheet};
+use crate::values::{Colour, Sink, Style, Styles, View, angle, colour, length, scalar, short};
 use crate::{Error, Limits, Warning, WarningKind};
 
 /// Reads a `.vsdx` drawing with [`Limits::DEFAULT`].
@@ -36,17 +37,19 @@ pub fn read_stencil_with(bytes: &[u8], limits: &Limits) -> Result<(Stencil, Vec<
     let mut count = 0;
     for id in doc.master_order.clone() {
         let Some(m) = doc.masters.get(&id) else { continue };
-        let (name, local_name, unique_id, icon_png) = (m.name.clone(), m.local_name.clone(), m.unique_id.clone(), m.icon_png.clone());
+        let (name, local_name, unique_id, part) = (m.name.clone(), m.local_name.clone(), m.unique_id.clone(), m.part.clone());
         let Some(base) = m.base.clone() else { continue };
         let height = m.page_height.unwrap_or(0.0);
+        let icon_png = part.and_then(|p| doc.icon(&p, &name));
         let mut flat = Flat {
             doc: &mut doc,
-            page: name.clone(),
+            page: short(&name),
             page_h: height,
             shapes: Vec::new(),
             connectors: Vec::new(),
             count: &mut count,
             glue: HashMap::new(),
+            rows: HashMap::new(),
         };
         flat.walk(&base, &Affine::IDENTITY, 0)?;
         let shapes = flat.shapes;
@@ -90,8 +93,17 @@ struct MasterData {
     unique_id: Option<String>,
     page_height: Option<f64>,
     base: Option<RawShape>,
-    icon_png: Option<Vec<u8>>,
+    /// The master part, for its icon.
+    part: Option<String>,
+    /// What copying `base` costs: see [`RawShape::weight`].
+    weight: usize,
 }
+
+/// Largest icon image kept, in bytes.
+const MAX_ICON: usize = 1024 * 1024;
+/// Most icon bytes kept across a stencil; parts several masters share count once.
+const MAX_ICON_TOTAL: usize = 32 * 1024 * 1024;
+const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 struct Doc {
     pkg: Package,
@@ -101,6 +113,11 @@ struct Doc {
     masters: HashMap<u32, MasterData>,
     master_order: Vec<u32>,
     sink: Sink,
+    /// Work left for copying masters into instances: shapes and rows.
+    work: usize,
+    /// Icon parts already read, by lower-case part name.
+    icons: HashMap<String, Option<Arc<[u8]>>>,
+    icon_bytes: usize,
 }
 
 fn u32_attr(el: &El, name: &str) -> Option<u32> {
@@ -125,6 +142,9 @@ impl Doc {
             masters: HashMap::new(),
             master_order: Vec::new(),
             sink: Sink::default(),
+            work: limits.max_shapes.saturating_add(limits.max_rows).saturating_mul(2),
+            icons: HashMap::new(),
+            icon_bytes: 0,
         };
         let root = doc.xml(&doc.doc_part.clone())?.ok_or_else(|| Error::NotVsdx("the document part is missing".into()))?;
         if root.local() != "VisioDocument" {
@@ -180,18 +200,19 @@ impl Doc {
             }
             let Some(id) = u32_attr(m, "ID") else { continue };
             let (name, local_name) = name_of(m);
-            let place = format!("master {name}");
+            let place = format!("master {}", short(&name));
             let page_height = m.child("PageSheet").map(sheet).and_then(|s| length(s.cell("PageHeight"), &mut self.sink, &place, "PageHeight"));
             let target = self.rel_target(m, &part);
-            let (base, icon_png) = match target {
-                Some(t) if seen.insert(t.to_ascii_lowercase()) => (self.master_base(&t, &place)?, self.icon(&t)),
+            let (base, part) = match target {
+                Some(t) if seen.insert(t.to_ascii_lowercase()) => (self.master_base(&t, &place)?, Some(t)),
                 _ => {
                     self.sink.push(WarningKind::Missing, &place, "no master part (or one another master already uses)");
                     (None, None)
                 }
             };
+            let weight = base.as_ref().map_or(0, RawShape::weight);
             let unique_id = m.attr("UniqueID").map(str::to_string);
-            self.masters.insert(id, MasterData { name, local_name, unique_id, page_height, base, icon_png });
+            self.masters.insert(id, MasterData { name, local_name, unique_id, page_height, base, part, weight });
             self.master_order.push(id);
         }
         Ok(())
@@ -211,35 +232,76 @@ impl Doc {
         })
     }
 
-    fn icon(&self, part: &str) -> Option<Vec<u8>> {
+    /// The PNG image a master part relates to: one at most [`MAX_ICON`] bytes long that starts
+    /// like a PNG, and within [`MAX_ICON_TOTAL`] across the stencil. Masters that relate to the
+    /// same image share it.
+    fn icon(&mut self, part: &str, name: &str) -> Option<Arc<[u8]>> {
         let rels = self.pkg.rels(part);
         let ct = self.pkg.content_types();
-        rels.all("image").filter(|r| !r.external).find_map(|r| {
+        let target = rels.all("image").filter(|r| !r.external).find_map(|r| {
             let png = ct.of(&r.target).is_some_and(|c| c.eq_ignore_ascii_case("image/png")) || r.target.to_ascii_lowercase().ends_with(".png");
-            if png { self.pkg.get(&r.target).map(<[u8]>::to_vec) } else { None }
-        })
+            png.then(|| r.target.clone())
+        })?;
+        let key = target.to_ascii_lowercase();
+        if let Some(known) = self.icons.get(&key) {
+            return known.clone();
+        }
+        let place = format!("master {}", short(name));
+        let bytes = self.pkg.get(&target)?;
+        let found = if !bytes.starts_with(PNG_MAGIC) {
+            self.sink.push(WarningKind::BadValue, &place, "icon is not a PNG image; left out");
+            None
+        } else if bytes.len() > MAX_ICON {
+            self.sink.push(WarningKind::Limit, &place, format!("icon over {MAX_ICON} bytes left out"));
+            None
+        } else if self.icon_bytes.saturating_add(bytes.len()) > MAX_ICON_TOTAL {
+            self.sink.push(WarningKind::Limit, &place, format!("icon left out: icons are over {MAX_ICON_TOTAL} bytes in all"));
+            None
+        } else {
+            self.icon_bytes += bytes.len();
+            Some(Arc::<[u8]>::from(bytes))
+        };
+        self.icons.insert(key, found.clone());
+        found
     }
 
     /// The top-level shapes of a `PageContents` or `MasterContents` element.
     fn raw_shapes(&mut self, root: &El, place: &str) -> Vec<RawShape> {
-        let mut cut = false;
+        let mut cuts = Cuts::default();
         let shapes = root
             .child("Shapes")
             .into_iter()
             .flat_map(|s| s.children("Shape"))
-            .map(|s| raw_shape(s, 0, self.limits.max_group_depth, &mut cut))
+            .map(|s| raw_shape(s, 0, self.limits.max_group_depth, &mut cuts))
             .collect();
-        if cut {
+        if cuts.depth {
             self.sink.push(WarningKind::Limit, place, format!("groups nested deeper than {} left out", self.limits.max_group_depth));
+        }
+        if cuts.name {
+            self.sink.push(WarningKind::Limit, place, format!("shape names longer than {MAX_NAME} characters cut"));
         }
         shapes
     }
 
     /// A shape with its master applied, and its sub-shapes' masters.
-    fn resolve(&mut self, s: &RawShape, place: &str) -> RawShape {
+    ///
+    /// Copying a master costs its shapes and rows against a budget shared by the whole read,
+    /// charged before the copy: a master with many parts instanced many times is refused
+    /// rather than multiplied in memory.
+    fn resolve(&mut self, s: &RawShape, place: &str) -> Result<RawShape, Error> {
         let mut out = match s.master {
-            Some(m) => match self.masters.get(&m).and_then(|d| d.base.as_ref()) {
-                Some(base) => merge_shape(s, base),
+            Some(m) => match self.masters.get(&m).and_then(|d| d.base.as_ref().map(|b| (b, d.weight))) {
+                Some((base, weight)) => {
+                    let Some(left) = self.work.checked_sub(weight) else {
+                        return Err(Error::TooMany {
+                            what: "shapes and rows copied from masters",
+                            limit: self.limits.max_shapes.saturating_add(self.limits.max_rows).saturating_mul(2),
+                        });
+                    };
+                    let merged = merge_shape(s, base);
+                    self.work = left;
+                    merged
+                }
                 None => {
                     self.sink.push(WarningKind::Missing, place, format!("shape {}: master {m} not found; drawn from its own cells", s.id));
                     s.clone()
@@ -247,8 +309,8 @@ impl Doc {
             },
             None => s.clone(),
         };
-        out.subs = out.subs.iter().map(|c| self.resolve(c, place)).collect();
-        out
+        out.subs = out.subs.iter().map(|c| self.resolve(c, place)).collect::<Result<_, _>>()?;
+        Ok(out)
     }
 
     fn pages(&mut self) -> Result<Drawing, Error> {
@@ -273,7 +335,7 @@ impl Doc {
                     let page = self.page(p, &t, name, &mut count)?;
                     drawing.pages.push(page);
                 }
-                _ => self.sink.push(WarningKind::Missing, &name, "no page part (or one another page already uses); page left out"),
+                _ => self.sink.push(WarningKind::Missing, &short(&name), "no page part (or one another page already uses); page left out"),
             }
         }
         Ok(drawing)
@@ -281,26 +343,28 @@ impl Doc {
 
     fn page(&mut self, entry: &El, part: &str, name: String, count: &mut usize) -> Result<Page, Error> {
         let ps = entry.child("PageSheet").map(sheet).unwrap_or_default();
-        let size = |n: &str, default: f64, sink: &mut Sink| match length(ps.cell(n), sink, &name, n) {
+        let place = short(&name);
+        let size = |n: &str, default: f64, sink: &mut Sink| match length(ps.cell(n), sink, &place, n) {
             Some(v) if v > 0.0 => v,
             _ => {
-                sink.push(WarningKind::BadValue, &name, format!("no usable {n}; {default} inches used"));
+                sink.push(WarningKind::BadValue, &place, format!("no usable {n}; {default} inches used"));
                 default
             }
         };
         let (w, h) = (size("PageWidth", 8.5, &mut self.sink), size("PageHeight", 11.0, &mut self.sink));
-        let mut page = Page { name: name.clone(), width: w * PT, height: h * PT, ..Page::default() };
+        let mut page = Page { name, width: w * PT, height: h * PT, ..Page::default() };
         let Some(root) = self.xml(part)? else {
-            self.sink.push(WarningKind::Missing, &name, "the page part is missing");
+            self.sink.push(WarningKind::Missing, &place, "the page part is missing");
             return Ok(page);
         };
-        let tops = self.raw_shapes(&root, &name);
+        let tops = self.raw_shapes(&root, &place);
         let glue = connects(&root);
-        let mut flat = Flat { doc: self, page: name, page_h: h, shapes: Vec::new(), connectors: Vec::new(), count, glue };
+        let mut flat = Flat { doc: self, page: place, page_h: h, shapes: Vec::new(), connectors: Vec::new(), count, glue, rows: HashMap::new() };
         for t in tops.iter().filter(|t| !t.del) {
-            let resolved = flat.doc.resolve(t, &flat.page);
+            let resolved = flat.doc.resolve(t, &flat.page)?;
             flat.walk(&resolved, &Affine::IDENTITY, 0)?;
         }
+        flat.fix_glue();
         page.shapes = flat.shapes;
         page.connectors = flat.connectors;
         Ok(page)
@@ -362,6 +426,9 @@ struct Flat<'a> {
     connectors: Vec<Connector>,
     count: &'a mut usize,
     glue: Glue,
+    /// The `IX` of each connection row of the shapes by ID, in the order of
+    /// [`Shape::connections`].
+    rows: HashMap<u32, Vec<u32>>,
 }
 
 /// A shape's transform cells, in inches and radians.
@@ -497,7 +564,10 @@ impl Flat<'_> {
         let (w, h) = (xf.w * PT, xf.h * PT);
         let mut ctx = Ctx { sink: &mut self.doc.sink, place, max_rows: self.doc.limits.max_rows };
         let geometry = paths(&s.sheet, (xf.w, xf.h), mirror, &mut ctx);
-        let connections = self.connections(&s.sheet, (xf.w, xf.h), mirror, place);
+        let (connections, ixs) = self.connections(&s.sheet, (xf.w, xf.h), mirror, place);
+        if s.id != 0 {
+            self.rows.entry(s.id).or_insert(ixs);
+        }
         let (line, line_weight, dashed) = self.line(s, place);
         let fill = self.fill(s, place);
         let tc = self.view(s).text_color();
@@ -527,16 +597,65 @@ impl Flat<'_> {
     }
 
     /// Connection section rows in the model's box space.
-    fn connections(&mut self, sh: &Sheet, (w, h): Point, mirror: bool, place: &str) -> Vec<Point> {
-        let Some(sec) = sh.section("Connection", 0) else { return Vec::new() };
-        let rows: Vec<_> = sec.rows.iter().filter(|(k, _)| matches!(k, RowKey::Ix(_))).map(|(_, r)| r).take(self.doc.limits.max_rows).collect();
+    /// The rows in `IX` order, with the `IX` of each: a gap in the numbering is kept in the
+    /// `IX`es, so that glue to `Connections.X<n>` can be matched to its row.
+    fn connections(&mut self, sh: &Sheet, (w, h): Point, mirror: bool, place: &str) -> (Vec<Point>, Vec<u32>) {
+        let Some(sec) = sh.section("Connection", 0) else { return (Vec::new(), Vec::new()) };
+        let rows: Vec<_> = sec
+            .rows
+            .iter()
+            .filter(|(_, r)| !r.del)
+            .filter_map(|(k, r)| if let RowKey::Ix(ix) = k { Some((*ix, r)) } else { None })
+            .take(self.doc.limits.max_rows)
+            .collect();
         rows.into_iter()
-            .map(|r| {
+            .map(|(ix, r)| {
                 let x = length(r.cells.get("X"), &mut self.doc.sink, place, "X").unwrap_or(0.0);
                 let y = length(r.cells.get("Y"), &mut self.doc.sink, place, "Y").unwrap_or(0.0);
-                ((if mirror { w - x } else { x }) * PT, (h - y) * PT)
+                (((if mirror { w - x } else { x }) * PT, (h - y) * PT), ix)
             })
-            .collect()
+            .unzip()
+    }
+
+    /// Makes the glue say what the model has: a connector end glued to a shape that is not
+    /// in the model (a guide, a skipped group, a deleted shape) is left free, and glue to
+    /// `Connections.X<n>` becomes the position of row `IX = n - 1` among the target's rows,
+    /// or the whole shape when it has no such row. Each is reported.
+    fn fix_glue(&mut self) {
+        let known: HashSet<u32> = self.shapes.iter().map(|s| s.id).filter(|&id| id != 0).collect();
+        let rows = &self.rows;
+        let sink = &mut self.doc.sink;
+        let place = &self.page;
+        for c in &mut self.connectors {
+            for (end, glue) in [("begin", &mut c.from), ("end", &mut c.to)] {
+                let Some((target, at)) = *glue else { continue };
+                if !known.contains(&target) {
+                    sink.push(
+                        WarningKind::Missing,
+                        place,
+                        format!("connector {}: its {end} is glued to shape {target}, which is not drawn; left free", c.id),
+                    );
+                    *glue = None;
+                    continue;
+                }
+                let ConnectionPoint::Point(n) = at else { continue };
+                let position = n.checked_sub(1).and_then(|ix| rows.get(&target)?.iter().position(|&r| r == ix));
+                match position.and_then(|p| u32::try_from(p + 1).ok()) {
+                    Some(p) => *glue = Some((target, ConnectionPoint::Point(p))),
+                    None => {
+                        sink.push(
+                            WarningKind::Missing,
+                            place,
+                            format!(
+                                "connector {}: its {end} is glued to connection point {n} of shape {target}, which has none; glued to the shape",
+                                c.id
+                            ),
+                        );
+                        *glue = Some((target, ConnectionPoint::Shape));
+                    }
+                }
+            }
+        }
     }
 
     fn connector(&mut self, s: &RawShape, xf: &Xf, full: &Affine, parent: &Affine, place: &str) {

@@ -9,9 +9,12 @@ use crate::{Warning, WarningKind};
 /// Most warnings kept for one read; one more says how many were dropped.
 const MAX_WARNINGS: usize = 1_000;
 /// Largest length read, in inches: a larger one would overflow once scaled to points.
-const MAX_LENGTH: f64 = 1e12;
+pub(crate) const MAX_LENGTH: f64 = 1e12;
 /// Most style sheets followed up a parent chain.
 const MAX_STYLE_CHAIN: usize = 32;
+
+/// Longest `place` kept in a warning, in characters.
+const MAX_PLACE: usize = 128;
 
 /// Warnings, capped.
 #[derive(Default)]
@@ -23,7 +26,7 @@ pub(crate) struct Sink {
 impl Sink {
     pub fn push(&mut self, kind: WarningKind, place: &str, message: impl Into<String>) {
         if self.list.len() < MAX_WARNINGS {
-            self.list.push(Warning { kind, place: place.to_string(), message: message.into() });
+            self.list.push(Warning { kind, place: place.chars().take(MAX_PLACE).collect(), message: message.into() });
         } else {
             self.dropped += 1;
         }
@@ -96,10 +99,11 @@ pub(crate) fn length(cell: Option<&Cell>, sink: &mut Sink, place: &str, name: &s
     }
 }
 
-/// A plain number (scalar, boolean, index) cell.
+/// A plain number (scalar, boolean, index) cell, within the length bound so that products of
+/// two of them stay finite.
 pub(crate) fn scalar(cell: Option<&Cell>, sink: &mut Sink, place: &str, name: &str) -> Option<f64> {
     match raw(cell, sink, place, name) {
-        Value::Num(n) => Some(n),
+        Value::Num(n) => Some(n.clamp(-MAX_LENGTH, MAX_LENGTH)),
         Value::Absent | Value::Bad => None,
     }
 }
@@ -253,5 +257,13 @@ impl View<'_> {
     pub fn text_color(&self) -> Option<Cell> {
         let own = self.sheet.section("Character", 0).and_then(|s| s.rows.get(&RowKey::Ix(0))).and_then(|r| r.cells.get("Color"));
         own.cloned().or_else(|| self.styles.row_cell(self.text, Category::Text, "Character", 0, "Color"))
+    }
+}
+
+/// A name cut to 64 characters for a warning's `place`.
+pub(crate) fn short(name: &str) -> String {
+    match name.char_indices().nth(64) {
+        Some((at, _)) => format!("{}...", &name[..at]),
+        None => name.to_string(),
     }
 }

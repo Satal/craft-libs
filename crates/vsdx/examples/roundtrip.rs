@@ -53,10 +53,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         link(7, 3, 4, vec![(250.0, 330.0), (250.0, 380.0)]),
     ];
     let drawing = Drawing { pages: vec![Page { name: "Flowchart".into(), width: 500.0, height: 480.0, shapes, connectors }] };
-    let bytes = write(&drawing)?;
+    let (bytes, written) = write(&drawing)?;
     std::fs::write(&path, &bytes)?;
     let (back, warnings) = read(&bytes)?;
     let page = back.pages.first().ok_or("no page read back")?;
-    println!("{path}: {} bytes, {} shapes, {} connectors, {} warnings", bytes.len(), page.shapes.len(), page.connectors.len(), warnings.len());
+    println!(
+        "{path}: {} bytes, {} shapes, {} connectors, {} warnings",
+        bytes.len(),
+        page.shapes.len(),
+        page.connectors.len(),
+        warnings.len() + written.len()
+    );
     Ok(())
 }
