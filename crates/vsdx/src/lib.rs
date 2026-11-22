@@ -1,5 +1,5 @@
 //! VSDX drawings and VSSX stencils: the XML drawing format specified by Microsoft in
-//! [MS-VSDX] *Visio Graphics Service VSDX File Format* v20250819, read and written on
+//! [MS-VSDX] *VSDX File Format* v20250819, read and written on
 //! [`craft_opc`] and [`craft_xml`].
 //!
 //! [`read`] turns a `.vsdx` package into a [`Drawing`]: pages, flattened shapes with their
@@ -56,7 +56,7 @@
 //!
 //! # Choices where the spec is silent
 //!
-//! The format notes this crate was built from leave these open; each is a choice, not a fact:
+//! MS-VSDX leaves these open; each is a choice, not a fact:
 //!
 //! - **O1 arrowheads.** `BeginArrow`/`EndArrow` take 0 (none) to 45, but which index is a
 //!   filled triangle is not stated. Reading keeps the index. [`ARROW`] (13) is what the writer
@@ -74,8 +74,8 @@
 //!   omits them.
 //! - **O6 glue formulas.** The formula an application writes for a glued end is not shown.
 //!   The writer stores real coordinates in `V`; for glue to a connection point it adds
-//!   `F="PAR(PNT(Sheet.<id>!Connections.X<n>,Sheet.<id>!Connections.Y<n>))"` (the form the
-//!   notes record), and for glue to a whole shape no formula. `Connects` names both.
+//!   `F="PAR(PNT(Sheet.<id>!Connections.X<n>,Sheet.<id>!Connections.Y<n>))"` (the form
+//!   recorded for glued ends), and for glue to a whole shape no formula. `Connects` names both.
 //!   `Connections.X<n>` is taken to name connection row `IX = n - 1`.
 //! - **O7 1-D shape box.** A connector's Width is the distance between its ends and Angle
 //!   their direction (`ATAN2`); its Height is not stated, and the writer uses 0.
